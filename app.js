@@ -1,5 +1,5 @@
 // ===== Chinchón – Marcador =====
-const APP_VERSION = '1.6.0';
+const APP_VERSION = '1.7.0';
 const KEY = 'chinchon-data-v1';
 const OFFICIAL_RULES = [
   ['La baraja', 'Se juega con baraja española de 40 cartas (sin ochos ni nueves). Pueden jugar de 2 a 6 jugadores.'],
@@ -23,7 +23,23 @@ const officialCopy = () => OFFICIAL_RULES.map(([title, text]) => ({ title, text 
 const uid = () => Math.random().toString(36).slice(2, 10);
 const $ = s => document.querySelector(s);
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const vibrate = (ms = 15) => navigator.vibrate && navigator.vibrate(ms);
+const vibrate = (ms = 15) => {
+  if (typeof S !== 'undefined' && S && S.adminConfig && S.adminConfig.vibrateEnabled === false) return;
+  if (navigator.vibrate) navigator.vibrate(ms);
+};
+
+const DEFAULT_ADMIN_CONFIG = {
+  adminName: 'Juan',
+  potEnabled: false,
+  potMinBet: 0.50,
+  potDistribution: 'all',
+  customPingHeader: '🔔 *¡Ping! Fin de partida de Chinchón* 🃏',
+  includeTitles: true,
+  customSignature: 'Marcador de Chinchón',
+  soundEnabled: true,
+  vibrateEnabled: true,
+  wakeLock: true
+};
 
 let S = load();
 if (!S.rulesList) { S.rulesList = officialCopy(); save(); }
@@ -43,11 +59,18 @@ function load() {
     const d = JSON.parse(localStorage.getItem(KEY));
     if (d) {
       if (!d.adminId) d.adminId = uid();
-      if (d.settings && d.settings.potPerEntry === undefined) d.settings.potPerEntry = 0;
+      d.adminConfig = Object.assign({}, DEFAULT_ADMIN_CONFIG, d.adminConfig || {});
+      if (d.settings && d.settings.potPerEntry === undefined) d.settings.potPerEntry = d.adminConfig.potEnabled ? d.adminConfig.potMinBet : 0;
       return d;
     }
   } catch (e) {}
-  return { adminId: uid(), groups: [], games: [], game: null, rulesList: officialCopy(), settings: { limit: 100, maxRejoins: 1, penalty: 10, potPerEntry: 0 } };
+  return {
+    adminId: uid(),
+    adminConfig: Object.assign({}, DEFAULT_ADMIN_CONFIG),
+    groups: [], games: [], game: null,
+    rulesList: officialCopy(),
+    settings: { limit: 100, maxRejoins: 1, penalty: 10, potPerEntry: 0 }
+  };
 }
 function save() { localStorage.setItem(KEY, JSON.stringify(S)); }
 function toast(msg, ms = 2200) { const t = $('#toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove('show'), ms); }
@@ -479,11 +502,32 @@ function handleMqttMsg(d) {
     ringBellSound();
     vibrate([80, 50, 100]);
     toast(`🔔 ¡${d.name} ha cerrado la mano! Dejad de robar.`, 3600);
+  } else if (d.type === 'forceReload') {
+    if (!isHost) {
+      if (!d.target || d.target === 'all' || (myPlayerName && myPlayerName.trim().toLowerCase() === d.target.trim().toLowerCase())) {
+        toast('🔄 Juan ha ordenado recargar tu pantalla...', 2200);
+        setTimeout(() => {
+          if (window.caches) {
+            caches.keys().then(ks => Promise.all(ks.map(k => caches.delete(k)))).finally(() => {
+              location.replace(location.pathname + '?r=' + Date.now());
+            });
+          } else {
+            location.replace(location.pathname + '?r=' + Date.now());
+          }
+        }, 600);
+      }
+    }
+  } else if (d.type === 'kick') {
+    if (!isHost && myPlayerName && myPlayerName.trim().toLowerCase() === d.target.trim().toLowerCase()) {
+      modal(`<h2>Mesa desconectada</h2><p class="muted">Has sido desconectado de la mesa por el Administrador.</p>
+        <button class="btn block" onclick="location.replace(location.pathname)">Volver al inicio</button>`);
+    }
   }
 }
 
 // Sonido y aviso de campana de cierre
 function ringBellSound() {
+  if (typeof S !== 'undefined' && S && S.adminConfig && S.adminConfig.soundEnabled === false) return;
   try {
     const ctx = new (window.AudioContext || window.webkitAudioContext)();
     const now = ctx.currentTime;
@@ -676,28 +720,49 @@ function buildGamePingReport(G) {
   const loser = ranked[ranked.length - 1] || { name: '–', score: 0 };
   const medals = ['🥇', '🥈', '🥉', '4º', '5º', '6º'];
   
-  // Bote si aplica
+  // Bote según la distribución configurada
+  const cfg = S.adminConfig || {};
   const st = G.settings || {};
   let potLine = '';
   if (st.potPerEntry && st.potPerEntry > 0) {
     const entries = G.players.length + G.players.reduce((sum, p) => sum + (p.rejoins || 0), 0);
-    const pot = (entries * st.potPerEntry).toFixed(2);
-    potLine = `💰 *Bote de la partida:* ${pot} € para ${winner.name} (${entries} entradas)\n\n`;
+    const potTotal = (entries * st.potPerEntry).toFixed(2);
+    const dist = cfg.potDistribution || 'all';
+
+    if (dist === 'split_70_30' && ranked.length > 1) {
+      const p1 = (potTotal * 0.70).toFixed(2);
+      const p2 = (potTotal * 0.30).toFixed(2);
+      potLine = `💰 *Bote de la partida (${potTotal} € · ${entries} entradas):*\n` +
+                `  🥇 1º (${winner.name}): *${p1} €*\n` +
+                `  🥈 2º (${ranked[1].name}): *${p2} €*\n\n`;
+    } else if (dist === 'split_podium' && ranked.length > 2) {
+      const p1 = (potTotal * 0.60).toFixed(2);
+      const p2 = (potTotal * 0.30).toFixed(2);
+      const p3 = (potTotal * 0.10).toFixed(2);
+      potLine = `💰 *Bote de la partida (${potTotal} € · ${entries} entradas):*\n` +
+                `  🥇 1º (${winner.name}): *${p1} €*\n` +
+                `  🥈 2º (${ranked[1].name}): *${p2} €*\n` +
+                `  🥉 3º (${ranked[2].name}): *${p3} €*\n\n`;
+    } else {
+      potLine = `💰 *Bote de la partida:* *${potTotal} €* para ${winner.name} (${entries} entradas a ${st.potPerEntry}€)\n\n`;
+    }
   }
 
   // Motes de honor
-  const titles = calculateTitles(G);
+  const titles = (cfg.includeTitles !== false) ? calculateTitles(G) : [];
   const titlesSection = titles.length ? `🎖️ *Menciones de honor:*\n${titles.join('\n')}\n\n` : '';
+  const header = cfg.customPingHeader || '🔔 *¡Ping! Fin de partida de Chinchón* 🃏';
+  const signature = cfg.customSignature ? `\n\n_${cfg.customSignature}_` : '\n\nPartida anotada con el Marcador de Chinchón.';
 
-  return `🔔 *¡Ping! Fin de partida de Chinchón* 🃏\n\n` +
+  return `${header}\n\n` +
     `🏆 *Ha ganado:* ${winner.name} (${winner.score} pts${G.how ? ' · ' + G.how : ''})\n` +
     `💀 *Ha perdido:* ${loser.name} (${loser.score} pts${loser.out ? ' · Eliminado' : ''})\n\n` +
     potLine +
     titlesSection +
     `📊 *Clasificación final:*\n` +
     ranked.map((p, i) => `${medals[i] || '•'} *${p.name}*: ${p.score} pts${p.out ? ' _(Eliminado)_' : ''}${p.rejoins ? ' (↻ ' + p.rejoins + ')' : ''}`).join('\n') +
-    `\n\n⏱️ *Rondas jugadas:* ${G.rounds.length}\n` +
-    `Partida anotada con el Marcador de Chinchón.`;
+    `\n\n⏱️ *Rondas jugadas:* ${G.rounds.length}` +
+    signature;
 }
 
 function openSendReportModal(game) {
@@ -726,6 +791,212 @@ function openSendReportModal(game) {
     <div style="margin-top:10px">
       <button class="btn block" onclick="closeModal()">Cerrar</button>
     </div>`);
+}
+
+// ===== PANEL DE CONFIGURACIÓN DE JUAN (ADMINISTRADOR) =====
+let adminCurrentTab = 'room';
+
+function openAdminSettings(tabName) {
+  if (tabName) adminCurrentTab = tabName;
+  const cfg = S.adminConfig;
+  const G = S.game;
+  
+  // Si no es el Administrador (por ejemplo si un invitado toca el engranaje)
+  if (!isHost && G) {
+    return modal(`<h2>⚙️ Ajustes</h2>
+      <p class="muted">Estás jugando como <b>${esc(myPlayerName || 'Invitado')}</b>.</p>
+      <div class="card" style="margin:14px 0">
+        <div class="cfg-row">
+          <div><div class="cfg-title">Sonido de campana</div><div class="cfg-desc">Reproducir sonido al cerrar mano</div></div>
+          <label class="switch"><input type="checkbox" ${cfg.soundEnabled !== false ? 'checked' : ''} onchange="cfg.soundEnabled=this.checked;save()"><span class="slider"></span></label>
+        </div>
+        <div class="cfg-row">
+          <div><div class="cfg-title">Vibración</div><div class="cfg-desc">Vibrar con avisos y botones</div></div>
+          <label class="switch"><input type="checkbox" ${cfg.vibrateEnabled !== false ? 'checked' : ''} onchange="cfg.vibrateEnabled=this.checked;save()"><span class="slider"></span></label>
+        </div>
+      </div>
+      <div class="card" style="background:var(--paper2)"><p class="muted" style="margin:0;font-size:.84rem">👑 La gestión de la mesa, apuestas y control remoto de jugadores está reservada para el Administrador (${esc(cfg.adminName || 'Juan')}).</p></div>
+      <button class="btn block" style="margin-top:14px" onclick="closeModal()">Cerrar</button>`);
+  }
+
+  // Vista completa de Juan (Administrador)
+  const tabs = [
+    ['room', '🎮 Mesa'],
+    ['pot', '💰 Apuestas'],
+    ['messages', '💬 WhatsApp'],
+    ['system', '⚙️ General']
+  ];
+
+  let body = '';
+  if (adminCurrentTab === 'room') {
+    if (G && G.players && G.players.length) {
+      body = `
+        <p class="muted" style="margin-bottom:12px">Control en vivo de los jugadores de la mesa actual (${esc(G.groupName)} · ${G.roomCode || 'Local'}):</p>
+        <div class="card" style="margin-bottom:12px;padding:8px 12px">
+          ${G.players.map((p, i) => `
+            <div class="cfg-row">
+              <div>
+                <b>${esc(p.name)}</b> <span class="muted">(${p.score} pts${p.out ? ' · Out' : ''})</span>
+                <div class="cfg-desc">${remoteDrafts[i] ? '🟢 Conectado con puntos' : '⚪ En espera'}</div>
+              </div>
+              <div class="row" style="gap:4px">
+                <button class="btn ghost sm" title="Recarga forzada si se le cuelga la app" onclick="remoteReloadPlayer('${esc(p.name)}')">🔄 Recargar</button>
+                <button class="btn danger sm" title="Expulsar jugador" onclick="remoteKickPlayer('${esc(p.name)}')">✕</button>
+              </div>
+            </div>`).join('')}
+        </div>
+        <button class="btn ghost block" style="margin-bottom:8px" onclick="remoteReloadPlayer('all')">🔄 Recargar app a TODOS los jugadores</button>
+        <button class="btn ghost block" onclick="remoteResyncRoom()">⚡ Resincronizar estado completo a todos</button>
+      `;
+    } else {
+      body = `
+        <div class="card empty" style="text-align:center;padding:24px">
+          <p>No hay ninguna partida activa en este momento.</p>
+          <span class="muted" style="font-size:.85rem">Cuando inicies una partida con móviles, desde aquí podrás recargarle la pantalla a quien se le quede colgada, resincronizarlos o expulsarlos.</span>
+        </div>
+      `;
+    }
+  } else if (adminCurrentTab === 'pot') {
+    body = `
+      <div class="card">
+        <div class="cfg-row">
+          <div>
+            <div class="cfg-title">Bote / Apuestas con dinero</div>
+            <div class="cfg-desc">Habilitar cálculo de porra o apuestas en las partidas</div>
+          </div>
+          <label class="switch"><input type="checkbox" id="cfg-pot-enabled" ${cfg.potEnabled ? 'checked' : ''} onchange="toggleAdminPot(this.checked)"><span class="slider"></span></label>
+        </div>
+      </div>
+      <div id="pot-suboptions" style="${cfg.potEnabled ? '' : 'opacity:.4;pointer-events:none'}">
+        <label>Importe por entrada y reenganche (€)</label>
+        <div class="row" style="margin-bottom:12px">
+          ${[0.20, 0.50, 1.00, 2.00, 5.00].map(v => `
+            <button class="btn ${cfg.potMinBet === v ? '' : 'ghost'} sm" style="flex:1" onclick="setAdminPotMin(${v})">${v.toFixed(2)}€</button>`).join('')}
+        </div>
+        <label>Modo de reparto del bote al finalizar</label>
+        <select id="cfg-pot-dist" onchange="setAdminPotDist(this.value)" style="margin-bottom:12px">
+          <option value="all" ${cfg.potDistribution === 'all' ? 'selected' : ''}>🥇 100% al ganador (Todo o nada)</option>
+          <option value="split_70_30" ${cfg.potDistribution === 'split_70_30' ? 'selected' : ''}>🥈 1º y 2º (70% al ganador · 30% al segundo)</option>
+          <option value="split_podium" ${cfg.potDistribution === 'split_podium' ? 'selected' : ''}>🥉 Podio (60% al 1º · 30% al 2º · 10% al 3º)</option>
+        </select>
+      </div>
+    `;
+  } else if (adminCurrentTab === 'messages') {
+    body = `
+      <label>Cabecera del mensaje de WhatsApp (Ping)</label>
+      <input id="cfg-ping-header" value="${esc(cfg.customPingHeader)}" style="margin-bottom:12px" onchange="cfg.customPingHeader=this.value.trim()||DEFAULT_ADMIN_CONFIG.customPingHeader;save()">
+      
+      <div class="card" style="margin-bottom:12px">
+        <div class="cfg-row">
+          <div>
+            <div class="cfg-title">Menciones de honor en el acta</div>
+            <div class="cfg-desc">Incluir El Francotirador, El Barista, El Inmortal...</div>
+          </div>
+          <label class="switch"><input type="checkbox" ${cfg.includeTitles !== false ? 'checked' : ''} onchange="cfg.includeTitles=this.checked;save()"><span class="slider"></span></label>
+        </div>
+      </div>
+
+      <label>Firma o despedida al final del mensaje</label>
+      <input id="cfg-signature" value="${esc(cfg.customSignature)}" onchange="cfg.customSignature=this.value.trim()||DEFAULT_ADMIN_CONFIG.customSignature;save()">
+    `;
+  } else if (adminCurrentTab === 'system') {
+    body = `
+      <label>Tu nombre como Administrador</label>
+      <input id="cfg-admin-name" value="${esc(cfg.adminName || 'Juan')}" style="margin-bottom:12px" onchange="setAdminName(this.value)">
+
+      <div class="card" style="margin-bottom:12px">
+        <div class="cfg-row">
+          <div>
+            <div class="cfg-title">Pantalla siempre encendida (Wake Lock)</div>
+            <div class="cfg-desc">Evita que el móvil se apague o bloquee mientras juegas</div>
+          </div>
+          <label class="switch"><input type="checkbox" ${cfg.wakeLock !== false ? 'checked' : ''} onchange="cfg.wakeLock=this.checked;save();if(cfg.wakeLock)requestWakeLock()"><span class="slider"></span></label>
+        </div>
+        <div class="cfg-row">
+          <div>
+            <div class="cfg-title">Campana de cierre con sonido</div>
+            <div class="cfg-desc">Tono de campana cristalina al pulsar ¡He cerrado!</div>
+          </div>
+          <label class="switch"><input type="checkbox" ${cfg.soundEnabled !== false ? 'checked' : ''} onchange="cfg.soundEnabled=this.checked;save()"><span class="slider"></span></label>
+        </div>
+        <div class="cfg-row">
+          <div>
+            <div class="cfg-title">Vibración háptica</div>
+            <div class="cfg-desc">Respuesta táctil al pulsar botones y avisos</div>
+          </div>
+          <label class="switch"><input type="checkbox" ${cfg.vibrateEnabled !== false ? 'checked' : ''} onchange="cfg.vibrateEnabled=this.checked;save()"><span class="slider"></span></label>
+        </div>
+      </div>
+
+      <button class="btn ghost block" onclick="hardReload()">🔄 Forzar recarga limpia de mi app</button>
+    `;
+  }
+
+  modal(`
+    <div class="row between" style="margin-bottom:8px">
+      <h2 style="margin:0">⚙️ Panel de Juan</h2>
+      <span class="admin-badge">👑 Administrador</span>
+    </div>
+    <div class="cfg-tabs">
+      ${tabs.map(([id, label]) => `<button class="cfg-tab ${adminCurrentTab === id ? 'active' : ''}" onclick="openAdminSettings('${id}')">${label}</button>`).join('')}
+    </div>
+    ${body}
+    <div class="row" style="margin-top:16px">
+      <button class="btn block" onclick="closeModal();render()">Guardar y cerrar</button>
+    </div>
+  `);
+}
+
+function setAdminName(val) {
+  S.adminConfig.adminName = val.trim() || 'Juan';
+  save();
+  toast('Nombre actualizado a ' + S.adminConfig.adminName);
+}
+
+function toggleAdminPot(val) {
+  S.adminConfig.potEnabled = val;
+  if (!val) S.settings.potPerEntry = 0;
+  else if (!S.settings.potPerEntry) S.settings.potPerEntry = S.adminConfig.potMinBet || 0.50;
+  save();
+  openAdminSettings('pot');
+}
+
+function setAdminPotMin(val) {
+  S.adminConfig.potMinBet = val;
+  if (S.adminConfig.potEnabled) S.settings.potPerEntry = val;
+  save();
+  openAdminSettings('pot');
+}
+
+function setAdminPotDist(val) {
+  S.adminConfig.potDistribution = val;
+  save();
+}
+
+function remoteReloadPlayer(targetName) {
+  sendMqtt({ type: 'forceReload', target: targetName });
+  toast(targetName === 'all' ? '🔄 Orden de recarga enviada a todos' : `🔄 Orden de recarga enviada a ${targetName}`);
+}
+
+function remoteResyncRoom() {
+  if (!S.game) return;
+  sendMqtt({ type: 'sync', game: S.game, draft });
+  toast('⚡ Estado de la mesa resincronizado con todos');
+}
+
+function remoteKickPlayer(targetName) {
+  if (!S.game) return;
+  sendMqtt({ type: 'kick', target: targetName });
+  const idx = S.game.players.findIndex(p => p.name.trim().toLowerCase() === targetName.trim().toLowerCase());
+  if (idx >= 0) {
+    S.game.players.splice(idx, 1);
+    delete draft[idx];
+    save();
+    render();
+    sendMqtt({ type: 'sync', game: S.game, draft });
+    toast(`Jugador ${targetName} expulsado de la mesa`);
+    openAdminSettings('room');
+  }
 }
 
 // ---------- GRUPOS ----------
@@ -840,8 +1111,19 @@ function resetRules() {
     <button class="btn block" onclick="S.rulesList=officialCopy();save();rulesView='ours';closeModal();render()">Sustituir</button></div>`);
 }
 
+let wakeLockSentinel = null;
+async function requestWakeLock() {
+  if (typeof navigator !== 'undefined' && 'wakeLock' in navigator && S && S.adminConfig && S.adminConfig.wakeLock !== false) {
+    try {
+      wakeLockSentinel = await navigator.wakeLock.request('screen');
+      wakeLockSentinel.addEventListener('release', () => { wakeLockSentinel = null; });
+    } catch (e) {}
+  }
+}
+
 render();
 checkRoomParam();
+requestWakeLock();
 $('#version').textContent = 'v' + APP_VERSION + ' ↻';
 // Botón discreto: tocar la versión fuerza una recarga limpia (borra cachés, no borra datos)
 $('#version').onclick = () => modal(`<h2>Recargar la app</h2><p class="muted">Descarga de nuevo la última versión. Tus grupos, historial y normas no se borran.</p>
