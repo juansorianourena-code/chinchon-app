@@ -166,6 +166,22 @@ td.tag, .tag { font-size: .68rem; color: var(--ink2); }
 }
 .btn-wa:active { background: #1da851 !important; }
 
+/* Botón campana y Administrador */
+.btn-bell {
+  background: var(--accent) !important; border-color: #8c321f !important; color: #fff !important;
+  font-weight: 700 !important; font-size: .95rem !important;
+}
+.btn-bell:active { opacity: .9; }
+.admin-badge {
+  background: var(--ink); color: var(--paper); font-size: .7rem; font-weight: 700;
+  padding: 3px 8px; border-radius: 3px; display: inline-flex; align-items: center; gap: 4px;
+}
+.pot-card {
+  display: flex; justify-content: space-between; align-items: center;
+  background: #faf6ea; border: 1px solid #d9c89e; border-radius: 4px;
+  padding: 8px 12px; margin-bottom: 10px; font-size: .88rem;
+}
+
 /* Normas numeradas */
 .seg { display: flex; border: 1px solid var(--ink); border-radius: 4px; overflow: hidden; margin-bottom: 8px; }
 .seg button { flex: 1; font: inherit; font-weight: 600; font-size: .88rem; padding: 10px; border: 0; background: transparent; color: var(--ink); }

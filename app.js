@@ -1,5 +1,5 @@
 // ===== Chinchón – Marcador =====
-const APP_VERSION = '1.5.0';
+const APP_VERSION = '1.6.0';
 const KEY = 'chinchon-data-v1';
 const OFFICIAL_RULES = [
   ['La baraja', 'Se juega con baraja española de 40 cartas (sin ochos ni nueves). Pueden jugar de 2 a 6 jugadores.'],
@@ -20,6 +20,10 @@ const OFFICIAL_RULES = [
 const ORD = ['Primera', 'Segunda', 'Tercera', 'Cuarta', 'Quinta', 'Sexta', 'Séptima', 'Octava', 'Novena', 'Décima', 'Undécima', 'Duodécima', 'Decimotercera', 'Decimocuarta', 'Decimoquinta', 'Decimosexta', 'Decimoséptima', 'Decimoctava', 'Decimonovena', 'Vigésima'];
 const ordinal = i => ORD[i] || `Norma ${i + 1}`;
 const officialCopy = () => OFFICIAL_RULES.map(([title, text]) => ({ title, text }));
+const uid = () => Math.random().toString(36).slice(2, 10);
+const $ = s => document.querySelector(s);
+const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const vibrate = (ms = 15) => navigator.vibrate && navigator.vibrate(ms);
 
 let S = load();
 if (!S.rulesList) { S.rulesList = officialCopy(); save(); }
@@ -35,14 +39,17 @@ let remoteDrafts = {};
 let mqttClient = null;
 
 function load() {
-  try { const d = JSON.parse(localStorage.getItem(KEY)); if (d) return d; } catch (e) {}
-  return { groups: [], games: [], game: null, rulesList: officialCopy(), settings: { limit: 100, maxRejoins: 1, penalty: 10 } };
+  try {
+    const d = JSON.parse(localStorage.getItem(KEY));
+    if (d) {
+      if (!d.adminId) d.adminId = uid();
+      if (d.settings && d.settings.potPerEntry === undefined) d.settings.potPerEntry = 0;
+      return d;
+    }
+  } catch (e) {}
+  return { adminId: uid(), groups: [], games: [], game: null, rulesList: officialCopy(), settings: { limit: 100, maxRejoins: 1, penalty: 10, potPerEntry: 0 } };
 }
 function save() { localStorage.setItem(KEY, JSON.stringify(S)); }
-const $ = s => document.querySelector(s);
-const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const uid = () => Math.random().toString(36).slice(2, 10);
-const vibrate = (ms = 15) => navigator.vibrate && navigator.vibrate(ms);
 function toast(msg, ms = 2200) { const t = $('#toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove('show'), ms); }
 function modal(html) { const m = $('#modal'); m.innerHTML = `<div class="card">${html}</div>`; m.classList.remove('hidden'); }
 function closeModal() { $('#modal').classList.add('hidden'); }
@@ -75,25 +82,71 @@ function viewPlay() {
     ${stepper('Límite de puntos (eliminado al pasarlo)', 'limit', st.limit, 5)}
     ${stepper('Reenganches permitidos por jugador', 'maxRejoins', st.maxRejoins, 1)}
     ${stepper('Puntos de penalización', 'penalty', st.penalty, 5)}
+    ${stepper('Bote por jugador y reenganche (€)', 'potPerEntry', st.potPerEntry || 0, 0.5)}
   </div>
-  <button id="btn-new-game" class="btn block" onclick="newGame()">Nueva partida</button>`;
+  <button id="btn-new-game" class="btn block" onclick="promptGameMode()">Nueva partida</button>`;
 }
 function stepper(label, key, val, step) {
   return `<label>${label}</label><div class="stepper">
-    <button class="btn ghost sm" onclick="setSetting('${key}',${-step})">−</button><b>${val}</b>
+    <button class="btn ghost sm" onclick="setSetting('${key}',${-step})">−</button><b>${key === 'potPerEntry' ? (val > 0 ? val.toFixed(2) + ' €' : 'Sin bote') : val}</b>
     <button class="btn ghost sm" onclick="setSetting('${key}',${step})">+</button></div>`;
 }
-function setSetting(k, d) { S.settings[k] = Math.max(0, S.settings[k] + d); save(); render(); }
+function setSetting(k, d) { S.settings[k] = Math.max(0, Math.round(((S.settings[k] || 0) + d) * 10) / 10); save(); render(); }
 
-function newGame() {
-  const g = S.groups.find(x => x.id === selGroup); if (!g) return;
-  S.game = {
-    id: uid(), groupId: g.id, groupName: g.name, date: Date.now(), settings: { ...S.settings },
-    players: g.players.map(n => ({ name: n, score: 0, rejoins: 0, out: false, chinchones: 0 })), rounds: [], dealer: 0,
-    roomCode: null
-  };
-  draft = {}; remoteDrafts = {}; isHost = true; save(); vibrate(30); render();
+function promptGameMode() {
+  const g = S.groups.find(x => x.id === selGroup);
+  if (!g) return toast('Elige o crea un grupo primero');
+  modal(`<h2>¿Cómo vais a jugar?</h2>
+    <p class="muted">Elige cómo se apuntarán los puntos en esta partida:</p>
+    
+    <div class="card" onclick="closeModal();startNewGame('online')" style="cursor:pointer;margin-bottom:12px;border:1.5px solid var(--ok);background:#f6fbf8">
+      <div class="row between">
+        <div>
+          <b style="font-size:1.05rem;color:var(--ok)">📱 Modo Móviles (Mesa conectada)</b>
+          <div class="muted" style="margin-top:4px;line-height:1.4">
+            Cada jugador apunta sus puntos desde su propio móvil por enlace.<br>
+            👑 <b>Tú eres el Administrador</b> y siempre ves y controlas todo.
+          </div>
+        </div>
+        <span style="font-size:1.5rem;color:var(--ok)">›</span>
+      </div>
+    </div>
+    
+    <div class="card" onclick="closeModal();startNewGame('single')" style="cursor:pointer">
+      <div class="row between">
+        <div>
+          <b style="font-size:1.05rem">✍️ Modo Clásico (Un solo móvil)</b>
+          <div class="muted" style="margin-top:4px;line-height:1.4">
+            Una sola persona apunta las cartas y puntos de todos en este mismo teléfono.
+          </div>
+        </div>
+        <span style="font-size:1.5rem">›</span>
+      </div>
+    </div>
+    
+    <button class="btn ghost block" onclick="closeModal()">Cancelar</button>`);
 }
+
+function startNewGame(mode) {
+  const g = S.groups.find(x => x.id === selGroup); if (!g) return;
+  const room = mode === 'online' ? ('CH-' + Math.random().toString(36).substring(2, 6).toUpperCase()) : null;
+  S.game = {
+    id: uid(), adminId: S.adminId, groupId: g.id, groupName: g.name, date: Date.now(), settings: { ...S.settings },
+    players: g.players.map(n => ({ name: n, score: 0, rejoins: 0, out: false, chinchones: 0 })), rounds: [], dealer: 0,
+    mode: mode, roomCode: room
+  };
+  draft = {}; remoteDrafts = {}; isHost = true;
+  save(); vibrate(30); render();
+  
+  if (mode === 'online') {
+    currentRoomCode = room;
+    initMqtt(room, () => {
+      sendMqtt({ type: 'sync', game: S.game, draft });
+    });
+    setTimeout(() => openShareModal(), 350);
+  }
+}
+function newGame() { promptGameMode(); }
 
 // ---------- PARTIDA ----------
 function entryTotal(e, pen) { return (parseInt(e.pts) || 0) + (e.m10 ? -10 : 0) + (e.m25 ? -25 : 0) + (e.pen || 0) * pen; }
@@ -104,26 +157,52 @@ function viewGame() {
   const dealerIdx = G.dealer ?? 0;
   const dealerPlayer = G.players[dealerIdx] || G.players[0] || { name: '–' };
   const roomActive = !!(G.roomCode && currentRoomCode);
+  
+  // Determinamos el rol: Si coincide el adminId somos el Administrador supremo
+  if (G.adminId) isHost = (G.adminId === S.adminId);
   syncMyPlayerIndex();
-  const isGuest = myPlayerIndex !== null && !isHost;
+  const isGuest = !isHost && myPlayerIndex !== null;
 
-  const liveBar = `<div class="live-bar ${roomActive ? '' : 'off'}" onclick="openShareModal()">
-    <span>${roomActive ? '<i class="live-dot"></i><b>Mesa en directo: ' + esc(G.roomCode) + '</b>' : '🔗 <b>Invitar jugadores con enlace</b>'}</span>
-    <span style="font-size:.8rem">${roomActive ? 'Compartir ›' : 'Crear enlace ›'}</span>
-  </div>`;
+  // Barra de cabecera según rol
+  let topHeader = '';
+  if (isHost) {
+    topHeader = `<div class="row between" style="background:var(--paper2);border:1px solid var(--ink);border-radius:4px;padding:8px 12px;margin-bottom:10px;font-size:.85rem">
+      <span>👑 <b>Eres el Administrador</b> ${G.mode === 'online' ? '· Sala ' + esc(G.roomCode) : '· Modo clásico'}</span>
+      <span>${G.mode === 'online' ? '<button class="btn ghost sm" onclick="openShareModal()">🔗 Invitar / Enlace</button>' : ''}</span>
+    </div>`;
+  } else if (roomActive) {
+    topHeader = `<div class="live-bar" onclick="openShareModal()">
+      <span><i class="live-dot"></i><b>Mesa en directo: ${esc(G.roomCode)}</b></span>
+      <span style="font-size:.8rem">Info ›</span>
+    </div>`;
+  }
 
+  // Bote acumulado si aplica
+  const potVal = st.potPerEntry || 0;
+  let potBanner = '';
+  if (potVal > 0) {
+    const entriesCount = G.players.length + G.players.reduce((sum, p) => sum + (p.rejoins || 0), 0);
+    const potTotal = (entriesCount * potVal).toFixed(2);
+    potBanner = `<div class="pot-card">
+      <span>💰 <b>Bote acumulado:</b></span>
+      <b style="font-size:1.05rem;color:#7a5a0f">${potTotal} € <span class="muted" style="font-size:.78rem">(${entriesCount} entradas)</span></b>
+    </div>`;
+  }
+
+  // Panel personal para invitados (su propio móvil)
   const guestBanner = isGuest && G.players[myPlayerIndex] ? `<div class="guest-panel">
-    <div class="row between"><span class="guest-tag">Tu panel de jugador</span>
+    <div class="row between"><span class="guest-tag">Tu panel de juego</span>
       <span class="muted" style="font-size:.78rem;cursor:pointer" onclick="promptJoinIdentity(currentRoomCode)">Cambiar (${esc(myPlayerName)})</span></div>
     <div style="font-size:1.15rem;font-weight:700;margin:4px 0 6px">${esc(myPlayerName)} · ${G.players[myPlayerIndex].score} puntos</div>
+    ${myPlayerIndex === dealerIdx && !G.players[myPlayerIndex].out ? '<div class="badge" style="background:var(--ink);color:var(--paper);display:block;text-align:center;padding:6px;font-weight:700;margin-bottom:8px">🂠 ¡Te toca barajar y dar cartas!</div>' : ''}
     <div class="row between muted" style="font-size:.85rem;margin-bottom:10px">
       <span>Faltan ${Math.max(0, st.limit - G.players[myPlayerIndex].score)} pts</span>
       <span>${st.maxRejoins - G.players[myPlayerIndex].rejoins} reeng. restantes</span>
     </div>
     ${G.players[myPlayerIndex].out ? '<div class="badge red" style="display:block;text-align:center;padding:8px">Estás eliminado de esta partida</div>' : `
       <label>Apunta tus puntos de esta mano:</label>
-      <div class="entry"><input id="pts-${myPlayerIndex}" type="number" inputmode="numeric" placeholder="Puntos mano" value="${(draft[myPlayerIndex] || {}).pts ?? ''}" oninput="setPts(${myPlayerIndex},this.value);submitGuestPts()">
-        <div class="pending" id="pend-${myPlayerIndex}">${entryTotal(draft[myPlayerIndex] || {}, st.penalty) > 0 ? '+' + entryTotal(draft[myPlayerIndex] || {}, st.penalty) : entryTotal(draft[myPlayerIndex] || {}, st.penalty)}</div></div>
+      <div class="entry"><input id="guest-pts" type="number" inputmode="numeric" placeholder="Puntos mano" value="${(draft[myPlayerIndex] || {}).pts ?? ''}" oninput="setPts(${myPlayerIndex},this.value);submitGuestPts()">
+        <div class="pending">${entryTotal(draft[myPlayerIndex] || {}, st.penalty) > 0 ? '+' + entryTotal(draft[myPlayerIndex] || {}, st.penalty) : entryTotal(draft[myPlayerIndex] || {}, st.penalty)}</div></div>
       <div class="quick">
         <button class="${(draft[myPlayerIndex] || {}).m10 ? 'on' : ''}" onclick="toggle(${myPlayerIndex},'m10');submitGuestPts()">−10</button>
         <button class="${(draft[myPlayerIndex] || {}).m25 ? 'on' : ''}" onclick="toggle(${myPlayerIndex},'m25');submitGuestPts()">−25</button>
@@ -131,39 +210,55 @@ function viewGame() {
         <button class="q-pen ${(draft[myPlayerIndex] || {}).pen ? 'on' : ''}" onclick="penalty(${myPlayerIndex});submitGuestPts()">${(draft[myPlayerIndex] || {}).pen ? '×' + (draft[myPlayerIndex] || {}).pen : '+' + st.penalty}</button>
       </div>
       <button class="btn block" style="margin-top:10px" onclick="submitGuestPts()">✅ Enviar mis puntos a la mesa</button>
+      <button class="btn btn-bell block" style="margin-top:8px" onclick="triggerCloseBell()">🔔 ¡He cerrado la mano!</button>
     `}
   </div>` : '';
 
-  return `${liveBar}${guestBanner}
+  return `${topHeader}${potBanner}${guestBanner}
   <div class="row between muted" style="margin-bottom:10px"><span>${esc(G.groupName)} · Ronda ${G.rounds.length + 1}</span>
     <span>Límite ${st.limit} · Reeng. ${st.maxRejoins}</span></div>
-  <div class="dealer" onclick="nextDealer()"><span class="muted">Reparte</span> <b>${esc(dealerPlayer.name)}</b> <span class="muted">· tocar para cambiar</span></div>
+  <div class="dealer" ${isHost ? 'onclick="nextDealer()"' : ''}><span class="muted">Reparte</span> <b>${esc(dealerPlayer.name)}</b> ${isHost ? '<span class="muted">· tocar para cambiar</span>' : ''}</div>
+  ${isHost ? `<button class="btn btn-bell block" style="margin-bottom:12px" onclick="triggerCloseBell()">🔔 ¡He cerrado la mano!</button>` : ''}
   <div class="players">${G.players.map((p, i) => {
     const e = draft[i] || {}; const t = entryTotal(e, st.penalty);
     const rejLeft = st.maxRejoins - p.rejoins;
+    
+    // Al Administrador le aparecen siempre todos los controles de todos los jugadores
+    // A los invitados solo les aparece la vista informativa sin inputs para los demás
+    const showControls = isHost;
+
     return `<div class="player ${p.out ? 'out' : ''} ${!p.out && alive.length > 1 && p.score === minScore && G.rounds.length ? 'leader' : ''}">
       <div class="row between"><span class="name">${!p.out && p.score === minScore && G.rounds.length ? '' : ''}${esc(p.name)}</span>
         <div class="badges">${remoteDrafts[i] ? '<span class="remote-badge">✓ Remoto</span>' : ''}${i === dealerIdx && !p.out ? '<span class="badge" style="border-color:var(--ink);color:var(--ink);font-weight:600">🂠 Reparte</span>' : ''}${p.rejoins ? `<span class="badge">↻ ${p.rejoins}</span>` : ''}${p.out ? '<span class="badge red">Eliminado</span>' : `<span class="badge">${rejLeft > 0 ? rejLeft + ' reeng.' : 'sin reeng.'}</span>`}</div></div>
       <div class="row between"><div class="score" id="score-${i}">${p.score}</div><div class="muted">faltan ${Math.max(0, st.limit - p.score)}</div></div>
       <div class="bar"><i style="width:${Math.min(100, p.score / st.limit * 100)}%"></i></div>
-      ${p.out ? '' : `<div class="entry"><input id="pts-${i}" type="number" inputmode="numeric" placeholder="Puntos de la mano" value="${e.pts ?? ''}" oninput="setPts(${i},this.value)">
-        <div class="pending" id="pend-${i}">${t > 0 ? '+' + t : t}</div></div>
-      <div class="quick">
-        <button class="${e.m10 ? 'on' : ''}" onclick="toggle(${i},'m10')">−10</button>
-        <button class="${e.m25 ? 'on' : ''}" onclick="toggle(${i},'m25')">−25</button>
-        <button class="q-ch" onclick="chinchon(${i})">Chinchón</button>
-        <button class="q-pen ${e.pen ? 'on' : ''}" onclick="penalty(${i})">${e.pen ? '×' + e.pen : '+' + st.penalty}</button>
-      </div>`}
+      ${p.out ? '' : (showControls ? `
+        <div class="entry"><input id="pts-${i}" type="number" inputmode="numeric" placeholder="Puntos de la mano" value="${e.pts ?? ''}" oninput="setPts(${i},this.value)">
+          <div class="pending" id="pend-${i}">${t > 0 ? '+' + t : t}</div></div>
+        <div class="quick">
+          <button class="${e.m10 ? 'on' : ''}" onclick="toggle(${i},'m10')">−10</button>
+          <button class="${e.m25 ? 'on' : ''}" onclick="toggle(${i},'m25')">−25</button>
+          <button class="q-ch" onclick="chinchon(${i})">Chinchón</button>
+          <button class="q-pen ${e.pen ? 'on' : ''}" onclick="penalty(${i})">${e.pen ? '×' + e.pen : '+' + st.penalty}</button>
+        </div>` : `
+        <div style="margin-top:6px;font-size:.85rem">
+          ${remoteDrafts[i] || (e.pts !== undefined && e.pts !== '') ? `<span style="color:var(--ok);font-weight:600">✓ Puntos apuntados (${t > 0 ? '+' + t : t})</span>` : '<span class="muted">⏳ Jugando mano...</span>'}
+        </div>
+      `)}
     </div>`;
   }).join('')}</div>
-  <div class="sticky-actions">
-    ${G.rounds.length ? '<button class="btn ghost" onclick="undoRound()">↩️</button>' : ''}
-    <button id="btn-close-round" class="btn block" onclick="closeRound()">Apuntar ronda</button>
-  </div>
+  ${isHost ? `
+    <div class="sticky-actions">
+      ${G.rounds.length ? '<button class="btn ghost" onclick="undoRound()">↩️</button>' : ''}
+      <button id="btn-close-round" class="btn block" onclick="closeRound()">Apuntar ronda</button>
+    </div>` : `
+    <div class="card" style="text-align:center;padding:12px;background:var(--paper2);margin-top:14px">
+      <span class="muted">👑 Esperando a que el Administrador cierre la ronda</span>
+    </div>`}
   ${G.rounds.length ? `<h2>Rondas</h2><div class="card"><table><tr><th>#</th>${G.players.map(p => `<th>${esc(p.name)}</th>`).join('')}</tr>
     ${G.rounds.map((r, n) => `<tr><td class="tag">${n + 1}</td>${r.totals.map((t, i) => `<td>${t === null ? '–' : (t > 0 ? '+' + t : t)}${r.events[i] ? `<div class="tag">${r.events[i]}</div>` : ''}</td>`).join('')}</tr>`).join('')}
   </table></div>` : ''}
-  <button class="btn danger block" style="margin-top:12px" onclick="abandonGame()">Abandonar partida</button>`;
+  ${isHost ? '<button class="btn danger block" style="margin-top:12px" onclick="abandonGame()">Abandonar partida</button>' : ''}`;
 }
 function setPts(i, v) {
   draft[i] = { ...(draft[i] || {}), pts: v };
@@ -380,7 +475,39 @@ function handleMqttMsg(d) {
       toast(`✓ ${d.playerName}: ${entryTotal(d.entry, S.game.settings.penalty)} pts`);
       render();
     }
+  } else if (d.type === 'bell') {
+    ringBellSound();
+    vibrate([80, 50, 100]);
+    toast(`🔔 ¡${d.name} ha cerrado la mano! Dejad de robar.`, 3600);
   }
+}
+
+// Sonido y aviso de campana de cierre
+function ringBellSound() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const now = ctx.currentTime;
+    [523.25, 659.25, 783.99, 1046.50].forEach((freq, i) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(freq, now + i * 0.05);
+      gain.gain.setValueAtTime(0.35, now + i * 0.05);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + i * 0.05 + 1.2);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(now + i * 0.05);
+      osc.stop(now + i * 0.05 + 1.2);
+    });
+  } catch(e) {}
+}
+
+function triggerCloseBell() {
+  ringBellSound();
+  vibrate([80, 40, 120]);
+  const name = myPlayerName || (isHost ? 'El Administrador' : 'Alguien');
+  sendMqtt({ type: 'bell', name });
+  toast(`🔔 ¡Has anunciado tu cierre a la mesa!`);
 }
 
 function syncMyPlayerIndex() {
@@ -489,6 +616,56 @@ function submitGuestPts() {
   vibrate(25);
 }
 
+function calculateTitles(G) {
+  const titles = [];
+  if (!G || !G.players || !G.rounds) return titles;
+  
+  // 1. El Francotirador: más cierres con −10 o −25
+  let maxMinus = 0, sniper = null;
+  G.players.forEach((p, i) => {
+    let count = 0;
+    G.rounds.forEach(r => {
+      if (r.flags && r.flags[i] && (r.flags[i].m10 || r.flags[i].m25)) count++;
+      else if (r.events && r.events[i] && (r.events[i].includes('−10') || r.events[i].includes('−25'))) count++;
+    });
+    if (count > maxMinus) { maxMinus = count; sniper = p.name; }
+  });
+  if (sniper && maxMinus > 0) titles.push(`👑 *El Francotirador:* ${sniper} (${maxMinus} ${maxMinus === 1 ? 'cierre perfecto' : 'cierres perfectos'})`);
+
+  // 2. El Inmortal: quien se reenganchó y aguantó más
+  const rejoining = G.players.filter(p => p.rejoins > 0);
+  if (rejoining.length) {
+    const best = [...rejoining].sort((a, b) => (a.out === b.out ? a.score - b.score : (a.out ? 1 : -1)))[0];
+    if (best) titles.push(`🧟 *El Inmortal:* ${best.name} (${best.rejoins} ${best.rejoins === 1 ? 'reenganche' : 'reenganches'})`);
+  }
+
+  // 3. El Barista: el primero eliminado o con peor puntuación
+  const firstElimRound = G.rounds.findIndex(r => r.totals && r.totals.some((t, i) => G.players[i].out && r.before && r.before[i] && !r.before[i].out));
+  let barista = null;
+  if (firstElimRound >= 0) {
+    const bIdx = G.rounds[firstElimRound].totals.findIndex((t, i) => G.players[i].out && G.rounds[firstElimRound].before && G.rounds[firstElimRound].before[i] && !G.rounds[firstElimRound].before[i].out);
+    if (bIdx >= 0) barista = G.players[bIdx].name;
+  }
+  if (!barista) {
+    const worst = [...G.players].sort((a, b) => b.score - a.score)[0];
+    if (worst) barista = worst.name;
+  }
+  if (barista) titles.push(`☕ *El Barista:* ${barista} (primer eliminado, encargado oficial del café)`);
+
+  // 4. El Pupas: la peor mano individual
+  let maxHand = 0, pupas = null;
+  G.rounds.forEach(r => {
+    if (r.totals) {
+      r.totals.forEach((t, i) => {
+        if (t && t > maxHand) { maxHand = t; pupas = G.players[i].name; }
+      });
+    }
+  });
+  if (pupas && maxHand >= 15) titles.push(`💥 *El Pupas:* ${pupas} (+${maxHand} pts de un golpe)`);
+
+  return titles;
+}
+
 function buildGamePingReport(G) {
   if (!G) return '';
   const ranked = [...G.players].sort((a, b) => {
@@ -499,9 +676,24 @@ function buildGamePingReport(G) {
   const loser = ranked[ranked.length - 1] || { name: '–', score: 0 };
   const medals = ['🥇', '🥈', '🥉', '4º', '5º', '6º'];
   
+  // Bote si aplica
+  const st = G.settings || {};
+  let potLine = '';
+  if (st.potPerEntry && st.potPerEntry > 0) {
+    const entries = G.players.length + G.players.reduce((sum, p) => sum + (p.rejoins || 0), 0);
+    const pot = (entries * st.potPerEntry).toFixed(2);
+    potLine = `💰 *Bote de la partida:* ${pot} € para ${winner.name} (${entries} entradas)\n\n`;
+  }
+
+  // Motes de honor
+  const titles = calculateTitles(G);
+  const titlesSection = titles.length ? `🎖️ *Menciones de honor:*\n${titles.join('\n')}\n\n` : '';
+
   return `🔔 *¡Ping! Fin de partida de Chinchón* 🃏\n\n` +
     `🏆 *Ha ganado:* ${winner.name} (${winner.score} pts${G.how ? ' · ' + G.how : ''})\n` +
     `💀 *Ha perdido:* ${loser.name} (${loser.score} pts${loser.out ? ' · Eliminado' : ''})\n\n` +
+    potLine +
+    titlesSection +
     `📊 *Clasificación final:*\n` +
     ranked.map((p, i) => `${medals[i] || '•'} *${p.name}*: ${p.score} pts${p.out ? ' _(Eliminado)_' : ''}${p.rejoins ? ' (↻ ' + p.rejoins + ')' : ''}`).join('\n') +
     `\n\n⏱️ *Rondas jugadas:* ${G.rounds.length}\n` +
