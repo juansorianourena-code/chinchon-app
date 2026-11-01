@@ -1,5 +1,5 @@
 // ===== Chinchón – Marcador =====
-const APP_VERSION = '1.4.0';
+const APP_VERSION = '1.5.0';
 const KEY = 'chinchon-data-v1';
 const OFFICIAL_RULES = [
   ['La baraja', 'Se juega con baraja española de 40 cartas (sin ochos ni nueves). Pueden jugar de 2 a 6 jugadores.'],
@@ -25,6 +25,14 @@ let S = load();
 if (!S.rulesList) { S.rulesList = officialCopy(); save(); }
 let tab = 'play';
 let draft = {}; // entradas de la ronda en curso: { idx: {pts:'', m10, m25, pen} }
+
+// ===== Multijugador / Sala en vivo =====
+let currentRoomCode = null;
+let myPlayerName = localStorage.getItem('chinchon_player_name') || null;
+let myPlayerIndex = null;
+let isHost = true;
+let remoteDrafts = {};
+let mqttClient = null;
 
 function load() {
   try { const d = JSON.parse(localStorage.getItem(KEY)); if (d) return d; } catch (e) {}
@@ -81,9 +89,10 @@ function newGame() {
   const g = S.groups.find(x => x.id === selGroup); if (!g) return;
   S.game = {
     id: uid(), groupId: g.id, groupName: g.name, date: Date.now(), settings: { ...S.settings },
-    players: g.players.map(n => ({ name: n, score: 0, rejoins: 0, out: false, chinchones: 0 })), rounds: [], dealer: 0
+    players: g.players.map(n => ({ name: n, score: 0, rejoins: 0, out: false, chinchones: 0 })), rounds: [], dealer: 0,
+    roomCode: null
   };
-  draft = {}; save(); vibrate(30); render();
+  draft = {}; remoteDrafts = {}; isHost = true; save(); vibrate(30); render();
 }
 
 // ---------- PARTIDA ----------
@@ -94,7 +103,39 @@ function viewGame() {
   const minScore = Math.min(...alive.map(p => p.score));
   const dealerIdx = G.dealer ?? 0;
   const dealerPlayer = G.players[dealerIdx] || G.players[0] || { name: '–' };
-  return `<div class="row between muted" style="margin-bottom:10px"><span>${esc(G.groupName)} · Ronda ${G.rounds.length + 1}</span>
+  const roomActive = !!(G.roomCode && currentRoomCode);
+  syncMyPlayerIndex();
+  const isGuest = myPlayerIndex !== null && !isHost;
+
+  const liveBar = `<div class="live-bar ${roomActive ? '' : 'off'}" onclick="openShareModal()">
+    <span>${roomActive ? '<i class="live-dot"></i><b>Mesa en directo: ' + esc(G.roomCode) + '</b>' : '🔗 <b>Invitar jugadores con enlace</b>'}</span>
+    <span style="font-size:.8rem">${roomActive ? 'Compartir ›' : 'Crear enlace ›'}</span>
+  </div>`;
+
+  const guestBanner = isGuest && G.players[myPlayerIndex] ? `<div class="guest-panel">
+    <div class="row between"><span class="guest-tag">Tu panel de jugador</span>
+      <span class="muted" style="font-size:.78rem;cursor:pointer" onclick="promptJoinIdentity(currentRoomCode)">Cambiar (${esc(myPlayerName)})</span></div>
+    <div style="font-size:1.15rem;font-weight:700;margin:4px 0 6px">${esc(myPlayerName)} · ${G.players[myPlayerIndex].score} puntos</div>
+    <div class="row between muted" style="font-size:.85rem;margin-bottom:10px">
+      <span>Faltan ${Math.max(0, st.limit - G.players[myPlayerIndex].score)} pts</span>
+      <span>${st.maxRejoins - G.players[myPlayerIndex].rejoins} reeng. restantes</span>
+    </div>
+    ${G.players[myPlayerIndex].out ? '<div class="badge red" style="display:block;text-align:center;padding:8px">Estás eliminado de esta partida</div>' : `
+      <label>Apunta tus puntos de esta mano:</label>
+      <div class="entry"><input id="pts-${myPlayerIndex}" type="number" inputmode="numeric" placeholder="Puntos mano" value="${(draft[myPlayerIndex] || {}).pts ?? ''}" oninput="setPts(${myPlayerIndex},this.value);submitGuestPts()">
+        <div class="pending" id="pend-${myPlayerIndex}">${entryTotal(draft[myPlayerIndex] || {}, st.penalty) > 0 ? '+' + entryTotal(draft[myPlayerIndex] || {}, st.penalty) : entryTotal(draft[myPlayerIndex] || {}, st.penalty)}</div></div>
+      <div class="quick">
+        <button class="${(draft[myPlayerIndex] || {}).m10 ? 'on' : ''}" onclick="toggle(${myPlayerIndex},'m10');submitGuestPts()">−10</button>
+        <button class="${(draft[myPlayerIndex] || {}).m25 ? 'on' : ''}" onclick="toggle(${myPlayerIndex},'m25');submitGuestPts()">−25</button>
+        <button class="q-ch" onclick="chinchon(${myPlayerIndex})">Chinchón</button>
+        <button class="q-pen ${(draft[myPlayerIndex] || {}).pen ? 'on' : ''}" onclick="penalty(${myPlayerIndex});submitGuestPts()">${(draft[myPlayerIndex] || {}).pen ? '×' + (draft[myPlayerIndex] || {}).pen : '+' + st.penalty}</button>
+      </div>
+      <button class="btn block" style="margin-top:10px" onclick="submitGuestPts()">✅ Enviar mis puntos a la mesa</button>
+    `}
+  </div>` : '';
+
+  return `${liveBar}${guestBanner}
+  <div class="row between muted" style="margin-bottom:10px"><span>${esc(G.groupName)} · Ronda ${G.rounds.length + 1}</span>
     <span>Límite ${st.limit} · Reeng. ${st.maxRejoins}</span></div>
   <div class="dealer" onclick="nextDealer()"><span class="muted">Reparte</span> <b>${esc(dealerPlayer.name)}</b> <span class="muted">· tocar para cambiar</span></div>
   <div class="players">${G.players.map((p, i) => {
@@ -102,7 +143,7 @@ function viewGame() {
     const rejLeft = st.maxRejoins - p.rejoins;
     return `<div class="player ${p.out ? 'out' : ''} ${!p.out && alive.length > 1 && p.score === minScore && G.rounds.length ? 'leader' : ''}">
       <div class="row between"><span class="name">${!p.out && p.score === minScore && G.rounds.length ? '' : ''}${esc(p.name)}</span>
-        <div class="badges">${i === dealerIdx && !p.out ? '<span class="badge" style="border-color:var(--ink);color:var(--ink);font-weight:600">🂠 Reparte</span>' : ''}${p.rejoins ? `<span class="badge">↻ ${p.rejoins}</span>` : ''}${p.out ? '<span class="badge red">Eliminado</span>' : `<span class="badge">${rejLeft > 0 ? rejLeft + ' reeng.' : 'sin reeng.'}</span>`}</div></div>
+        <div class="badges">${remoteDrafts[i] ? '<span class="remote-badge">✓ Remoto</span>' : ''}${i === dealerIdx && !p.out ? '<span class="badge" style="border-color:var(--ink);color:var(--ink);font-weight:600">🂠 Reparte</span>' : ''}${p.rejoins ? `<span class="badge">↻ ${p.rejoins}</span>` : ''}${p.out ? '<span class="badge red">Eliminado</span>' : `<span class="badge">${rejLeft > 0 ? rejLeft + ' reeng.' : 'sin reeng.'}</span>`}</div></div>
       <div class="row between"><div class="score" id="score-${i}">${p.score}</div><div class="muted">faltan ${Math.max(0, st.limit - p.score)}</div></div>
       <div class="bar"><i style="width:${Math.min(100, p.score / st.limit * 100)}%"></i></div>
       ${p.out ? '' : `<div class="entry"><input id="pts-${i}" type="number" inputmode="numeric" placeholder="Puntos de la mano" value="${e.pts ?? ''}" oninput="setPts(${i},this.value)">
@@ -126,7 +167,8 @@ function viewGame() {
 }
 function setPts(i, v) {
   draft[i] = { ...(draft[i] || {}), pts: v };
-  const t = entryTotal(draft[i], S.game.settings.penalty); $('#pend-' + i).textContent = t > 0 ? '+' + t : t;
+  const t = entryTotal(draft[i], S.game.settings.penalty);
+  const pend = $('#pend-' + i); if (pend) pend.textContent = t > 0 ? '+' + t : t;
 }
 function toggle(i, k) { draft[i] = { ...(draft[i] || {}) }; draft[i][k] = !draft[i][k]; if (k === 'm10' && draft[i].m10) draft[i].m25 = false; if (k === 'm25' && draft[i].m25) draft[i].m10 = false; vibrate(); render(); }
 function penalty(i) { draft[i] = { ...(draft[i] || {}) }; draft[i].pen = ((draft[i].pen || 0) + 1) % 4; vibrate(); render(); }
@@ -171,7 +213,8 @@ function closeRound() {
   if (!msgs.length) G.players.forEach((p, i) => { if (!p.out && st.limit - p.score <= 10 && totals[i] > 0) msgs.push(pick(TAUNT_EDGE)(p.name, st.limit - p.score)); });
   G.rounds.push({ before, totals, events, flags, dealer: G.dealer ?? 0 });
   advanceDealer();
-  draft = {}; save(); vibrate(25);
+  draft = {}; remoteDrafts = {}; save(); vibrate(25);
+  sendMqtt({ type: 'sync', game: G, draft: {} });
   const alive = G.players.filter(p => !p.out);
   if (alive.length === 1) return finishGame(G.players.indexOf(alive[0]), 'último en pie');
   render();
@@ -180,7 +223,9 @@ function closeRound() {
 }
 function undoRound() {
   const G = S.game; const r = G.rounds.pop(); if (!r) return;
-  G.players = r.before; if (r.dealer !== undefined) G.dealer = r.dealer; save(); toast('Ronda deshecha'); render();
+  G.players = r.before; if (r.dealer !== undefined) G.dealer = r.dealer; save(); toast('Ronda deshecha');
+  sendMqtt({ type: 'sync', game: G, draft: {} });
+  render();
 }
 function advanceDealer() {
   const G = S.game; if (!G || !G.players || !G.players.length) return;
@@ -188,7 +233,7 @@ function advanceDealer() {
   for (let k = 0; k < n; k++) { d = (d + 1) % n; if (!G.players[d].out) break; }
   G.dealer = d;
 }
-function nextDealer() { advanceDealer(); save(); render(); vibrate(); }
+function nextDealer() { advanceDealer(); save(); render(); vibrate(); if (S.game) sendMqtt({ type: 'sync', game: S.game, draft }); }
 const pick = a => a[Math.floor(Math.random() * a.length)];
 const TAUNT_REJOIN = [
   (n, t) => `${n} se reengancha con ${t}. Vida extra.`,
@@ -213,12 +258,14 @@ function abandonGame() {
 }
 function finishGame(wi, how) {
   const G = S.game; G.winner = G.players[wi].name; G.how = how; G.end = Date.now();
+  sendMqtt({ type: 'sync', game: G, draft: {} });
   S.games.unshift(G); S.game = null; draft = {}; save(); render();
   vibrate([60, 40, 120]);
   modal(`<div class="win"><div class="trophy">♠</div><h2 style="font-size:1.6rem">¡Gana ${esc(G.winner)}!</h2>
     <p class="muted">Por ${how} · ${G.rounds.length} rondas</p>
     ${G.players.map(p => `<div class="rank"><span>${esc(p.name)}${p.rejoins ? ' ↻ ' + p.rejoins : ''}</span><b>${p.score}</b></div>`).join('')}
-    <div class="row" style="margin-top:14px"><button class="btn ghost block" onclick="closeModal();tab='history';render()">Historial</button>
+    <button class="btn btn-wa block" style="margin-top:14px;font-size:1rem" onclick="openSendReportModal(S.games[0])">📲 Enviar resultado por WhatsApp</button>
+    <div class="row" style="margin-top:8px"><button class="btn ghost block" onclick="closeModal();tab='history';render()">Historial</button>
     <button class="btn block" onclick="closeModal();selGroup='${G.groupId}';newGame()">Revancha</button></div></div>`);
 }
 function confetti() {
@@ -229,6 +276,264 @@ function confetti() {
     c.style.animationDuration = 1.5 + Math.random() * 2 + 's'; c.style.animationDelay = Math.random() * .5 + 's';
     document.body.appendChild(c); setTimeout(() => c.remove(), 4500);
   }
+}
+
+// ===== SINCRONIZACIÓN EN TIEMPO REAL & MENSAJES =====
+function initMqtt(roomCode, onConnect) {
+  if (mqttClient && mqttClient.isConnected && mqttClient.isConnected()) {
+    if (currentRoomCode !== roomCode) {
+      try { mqttClient.unsubscribe(`chinchon/v1/${currentRoomCode}`); } catch(e) {}
+      currentRoomCode = roomCode;
+      mqttClient.subscribe(`chinchon/v1/${roomCode}`, { qos: 1 });
+    }
+    if (onConnect) onConnect();
+    return;
+  }
+  if (typeof Paho === 'undefined' || !Paho.MQTT) {
+    console.warn('Paho MQTT no disponible');
+    return;
+  }
+  currentRoomCode = roomCode;
+  const clientId = 'ch_' + Math.random().toString(36).substring(2, 9);
+  try {
+    mqttClient = new Paho.MQTT.Client('broker.emqx.io', 8084, '/mqtt', clientId);
+    mqttClient.onConnectionLost = () => {
+      setTimeout(() => { if (currentRoomCode) initMqtt(currentRoomCode); }, 3500);
+    };
+    mqttClient.onMessageArrived = msg => {
+      try { handleMqttMsg(JSON.parse(msg.payloadString)); } catch(e) {}
+    };
+    mqttClient.connect({
+      useSSL: true, timeout: 6, cleanSession: true, keepAliveInterval: 30,
+      onSuccess: () => {
+        mqttClient.subscribe(`chinchon/v1/${roomCode}`, { qos: 1 });
+        if (onConnect) onConnect();
+        if (!isHost || !S.game) sendMqtt({ type: 'reqSync' });
+      },
+      onFailure: () => fallbackHiveMqtt(roomCode, onConnect)
+    });
+  } catch(e) { console.warn('MQTT err', e); }
+}
+
+function fallbackHiveMqtt(roomCode, onConnect) {
+  try {
+    const clientId = 'ch_' + Math.random().toString(36).substring(2, 9);
+    mqttClient = new Paho.MQTT.Client('broker.hivemq.com', 8884, '/mqtt', clientId);
+    mqttClient.onMessageArrived = msg => {
+      try { handleMqttMsg(JSON.parse(msg.payloadString)); } catch(e) {}
+    };
+    mqttClient.connect({
+      useSSL: true, timeout: 6, cleanSession: true, keepAliveInterval: 30,
+      onSuccess: () => {
+        mqttClient.subscribe(`chinchon/v1/${roomCode}`, { qos: 1 });
+        if (onConnect) onConnect();
+        if (!isHost || !S.game) sendMqtt({ type: 'reqSync' });
+      }
+    });
+  } catch(e) {}
+}
+
+function sendMqtt(data) {
+  if (!mqttClient || !mqttClient.isConnected || !mqttClient.isConnected() || !currentRoomCode) return;
+  try {
+    const m = new Paho.MQTT.Message(JSON.stringify(data));
+    m.destinationName = `chinchon/v1/${currentRoomCode}`;
+    m.qos = 1;
+    mqttClient.send(m);
+  } catch(e) {}
+}
+
+function handleMqttMsg(d) {
+  if (!d || !d.type) return;
+  if (d.type === 'sync') {
+    if (!isHost || (!S.game && d.game)) {
+      S.game = d.game;
+      if (d.draft) draft = { ...draft, ...d.draft };
+      syncMyPlayerIndex();
+      save();
+      render();
+    }
+  } else if (d.type === 'reqSync') {
+    if (isHost && S.game) sendMqtt({ type: 'sync', game: S.game, draft });
+  } else if (d.type === 'join') {
+    if (isHost && S.game) {
+      const exists = S.game.players.findIndex(p => p.name.trim().toLowerCase() === d.name.trim().toLowerCase());
+      if (exists === -1) {
+        S.game.players.push({ name: d.name.trim(), score: 0, rejoins: 0, out: false, chinchones: 0 });
+        toast(`¡${d.name} se ha unido a la mesa!`);
+        save();
+        render();
+        sendMqtt({ type: 'sync', game: S.game, draft });
+      } else {
+        toast(`¡${d.name} está conectado!`);
+        sendMqtt({ type: 'sync', game: S.game, draft });
+      }
+    }
+  } else if (d.type === 'draft') {
+    if (S.game && d.playerIndex >= 0 && d.playerIndex < S.game.players.length) {
+      draft[d.playerIndex] = d.entry;
+      remoteDrafts[d.playerIndex] = true;
+      if (isHost) {
+        save();
+        sendMqtt({ type: 'sync', game: S.game, draft });
+      }
+      toast(`✓ ${d.playerName}: ${entryTotal(d.entry, S.game.settings.penalty)} pts`);
+      render();
+    }
+  }
+}
+
+function syncMyPlayerIndex() {
+  if (!S.game || !myPlayerName) { myPlayerIndex = null; return; }
+  const idx = S.game.players.findIndex(p => p.name.trim().toLowerCase() === myPlayerName.trim().toLowerCase());
+  myPlayerIndex = idx >= 0 ? idx : null;
+}
+
+function checkRoomParam() {
+  if (typeof window === 'undefined' || !window.location) return;
+  let r = '';
+  try {
+    const urlP = new URLSearchParams(window.location.search);
+    const hashP = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+    r = (urlP.get('room') || hashP.get('room') || '').toUpperCase().trim();
+  } catch(e) {}
+  if (r) {
+    isHost = false;
+    currentRoomCode = r;
+    initMqtt(r, () => {
+      promptJoinIdentity(r);
+    });
+  }
+}
+
+function promptJoinIdentity(roomCode) {
+  syncMyPlayerIndex();
+  const players = S.game ? S.game.players : [];
+  modal(`<h2>🃏 Unirse a la mesa ${esc(roomCode)}</h2>
+    <p class="muted">Elige quién eres para apuntar tus propios puntos desde tu móvil:</p>
+    ${players.length ? `<div style="margin-bottom:12px">${players.map((p, i) => `
+      <button class="btn ghost block" style="margin-bottom:6px;text-align:left;font-size:1rem" onclick="selectRole('${esc(p.name)}', ${i})">
+        👉 Soy <b>${esc(p.name)}</b>
+      </button>`).join('')}</div>` : ''}
+    <label>O introduce tu nombre si eres nuevo:</label>
+    <div class="row" style="margin-top:6px">
+      <input id="join-name" placeholder="Ej: Miguel" value="${esc(myPlayerName || '')}">
+      <button class="btn" onclick="submitNewPlayer()">Entrar</button>
+    </div>`);
+}
+
+function selectRole(name, idx) {
+  myPlayerName = name;
+  myPlayerIndex = idx;
+  localStorage.setItem('chinchon_player_name', name);
+  closeModal();
+  toast(`Identificado como ${name}`);
+  render();
+}
+
+function submitNewPlayer() {
+  const name = ($('#join-name').value || '').trim();
+  if (!name) return toast('Escribe tu nombre');
+  myPlayerName = name;
+  localStorage.setItem('chinchon_player_name', name);
+  closeModal();
+  sendMqtt({ type: 'join', name });
+  toast(`Entrando como ${name}…`);
+  setTimeout(() => { syncMyPlayerIndex(); render(); }, 800);
+}
+
+function ensureRoom() {
+  if (!S.game) return;
+  if (!S.game.roomCode) {
+    S.game.roomCode = 'CH-' + Math.random().toString(36).substring(2, 6).toUpperCase();
+    save();
+  }
+  currentRoomCode = S.game.roomCode;
+  initMqtt(currentRoomCode, () => {
+    sendMqtt({ type: 'sync', game: S.game, draft });
+  });
+}
+
+function openShareModal() {
+  ensureRoom();
+  const G = S.game;
+  const room = G.roomCode;
+  const link = `${window.location.origin}${window.location.pathname}?room=${room}`;
+  const shareText = `🃏 ¡Únete a nuestra mesa de Chinchón! Entra en este enlace para apuntar tus puntos: ${link}`;
+  
+  modal(`<h2>🔗 Invitar a la mesa en directo</h2>
+    <div class="share-code-box">
+      <div class="muted">CÓDIGO DE SALA</div>
+      <div class="share-code">${room}</div>
+      <div class="muted">Quien abra el enlace podrá apuntar sus puntos desde su propio móvil.</div>
+    </div>
+    <input readonly value="${link}" style="font-size:.85rem;margin-bottom:10px" onclick="this.select()">
+    <div class="row" style="margin-bottom:8px">
+      <button class="btn btn-wa block" onclick="openWaShare('${encodeURIComponent(shareText)}')">📲 Enviar por WhatsApp</button>
+      <button class="btn ghost block" onclick="navigator.clipboard.writeText('${link}').then(()=>toast('Enlace copiado al portapapeles'))">📋 Copiar</button>
+    </div>
+    ${navigator.share ? `<button class="btn ghost block" style="margin-bottom:8px" onclick="navigator.share({title:'Chinchón en vivo',text:${JSON.stringify(shareText)},url:'${link}'})">📤 Compartir enlace…</button>` : ''}
+    <button class="btn block" onclick="closeModal()">Listo</button>`);
+}
+
+function openWaShare(encodedText, phone = '') {
+  const url = phone ? `https://wa.me/${phone}?text=${encodedText}` : `https://wa.me/?text=${encodedText}`;
+  window.open(url, '_blank');
+}
+
+function submitGuestPts() {
+  if (myPlayerIndex === null || !S.game) return;
+  const e = draft[myPlayerIndex] || {};
+  sendMqtt({ type: 'draft', playerIndex: myPlayerIndex, playerName: myPlayerName, entry: e });
+  toast(`✓ Puntos de ${myPlayerName} enviados a la mesa`);
+  vibrate(25);
+}
+
+function buildGamePingReport(G) {
+  if (!G) return '';
+  const ranked = [...G.players].sort((a, b) => {
+    if (a.out !== b.out) return a.out ? 1 : -1;
+    return a.score - b.score;
+  });
+  const winner = ranked[0] || { name: G.winner || '–', score: 0 };
+  const loser = ranked[ranked.length - 1] || { name: '–', score: 0 };
+  const medals = ['🥇', '🥈', '🥉', '4º', '5º', '6º'];
+  
+  return `🔔 *¡Ping! Fin de partida de Chinchón* 🃏\n\n` +
+    `🏆 *Ha ganado:* ${winner.name} (${winner.score} pts${G.how ? ' · ' + G.how : ''})\n` +
+    `💀 *Ha perdido:* ${loser.name} (${loser.score} pts${loser.out ? ' · Eliminado' : ''})\n\n` +
+    `📊 *Clasificación final:*\n` +
+    ranked.map((p, i) => `${medals[i] || '•'} *${p.name}*: ${p.score} pts${p.out ? ' _(Eliminado)_' : ''}${p.rejoins ? ' (↻ ' + p.rejoins + ')' : ''}`).join('\n') +
+    `\n\n⏱️ *Rondas jugadas:* ${G.rounds.length}\n` +
+    `Partida anotada con el Marcador de Chinchón.`;
+}
+
+function openSendReportModal(game) {
+  const G = game || S.game || S.games[0];
+  if (!G) return toast('No hay partida');
+  const reportText = buildGamePingReport(G);
+  const encoded = encodeURIComponent(reportText);
+
+  modal(`<h2>📲 Enviar resultado de la partida</h2>
+    <p class="muted">Elige a quién quieres mandarle el ping con el resultado:</p>
+    <div style="margin-bottom:12px">
+      <button class="btn btn-wa block" style="margin-bottom:10px;font-size:1rem" onclick="openWaShare('${encoded}')">
+        👥 <b>Compartir con el grupo de WhatsApp</b>
+      </button>
+      <div class="muted" style="margin:10px 0 6px">O enviar mensaje privado a:</div>
+      ${G.players.map(p => `
+        <button class="btn ghost block" style="margin-bottom:6px;display:flex;justify-content:space-between;align-items:center" onclick="openWaShare('${encoded}')">
+          <span>👤 <b>${esc(p.name)}</b> <span class="muted">(${p.score} pts)</span></span>
+          <span style="color:#25d366;font-size:.85rem;font-weight:700">WhatsApp ›</span>
+        </button>`).join('')}
+    </div>
+    <div class="row">
+      <button class="btn ghost block" onclick="navigator.clipboard.writeText(${JSON.stringify(reportText)}).then(()=>toast('¡Mensaje copiado!'))">📋 Copiar texto</button>
+      ${navigator.share ? `<button class="btn ghost block" onclick="navigator.share({title:'Resultado Chinchón',text:${JSON.stringify(reportText)}})">📤 Compartir…</button>` : ''}
+    </div>
+    <div style="margin-top:10px">
+      <button class="btn block" onclick="closeModal()">Cerrar</button>
+    </div>`);
 }
 
 // ---------- GRUPOS ----------
@@ -292,7 +597,8 @@ function showGame(id) {
     <div style="max-height:45vh;overflow:auto"><table><tr><th>#</th>${g.players.map(p => `<th>${esc(p.name)}</th>`).join('')}</tr>
     ${g.rounds.map((r, n) => `<tr><td class="tag">${n + 1}</td>${r.totals.map((t, i) => `<td>${t === null ? '–' : t}${r.events[i] ? `<div class="tag">${r.events[i]}</div>` : ''}</td>`).join('')}</tr>`).join('')}
     <tr><th>Σ</th>${g.players.map(p => `<th>${p.score}</th>`).join('')}</tr></table></div>
-    <div class="row" style="margin-top:14px"><button class="btn danger block" onclick="S.games=S.games.filter(x=>x.id!=='${id}');save();closeModal();render()">Borrar</button>
+    <button class="btn btn-wa block" style="margin-top:12px;font-size:1rem" onclick="openSendReportModal(S.games.find(x=>x.id==='${id}'))">📲 Enviar resultado por WhatsApp</button>
+    <div class="row" style="margin-top:8px"><button class="btn danger block" onclick="S.games=S.games.filter(x=>x.id!=='${id}');save();closeModal();render()">Borrar</button>
     <button class="btn block" onclick="closeModal()">Cerrar</button></div>`);
 }
 
@@ -343,6 +649,7 @@ function resetRules() {
 }
 
 render();
+checkRoomParam();
 $('#version').textContent = 'v' + APP_VERSION + ' ↻';
 // Botón discreto: tocar la versión fuerza una recarga limpia (borra cachés, no borra datos)
 $('#version').onclick = () => modal(`<h2>Recargar la app</h2><p class="muted">Descarga de nuevo la última versión. Tus grupos, historial y normas no se borran.</p>
