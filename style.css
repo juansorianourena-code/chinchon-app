@@ -15,8 +15,9 @@ body {
 .topbar {
   position: sticky; top: 0; z-index: 5; padding: calc(var(--safe-t) + 12px) 20px 12px;
   background: linear-gradient(180deg, rgba(11,42,28,.95), rgba(11,42,28,.7)); backdrop-filter: blur(12px);
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between;
 }
+.version { font-size: .72rem; color: var(--muted); padding: 4px 10px; border: 1px solid var(--border); border-radius: 99px; }
 .topbar h1 {
   margin: 0; font-size: 1.5rem; font-weight: 800; letter-spacing: .5px;
   background: linear-gradient(90deg, var(--gold), #fff3c9, var(--gold2)); -webkit-background-clip: text; background-clip: text; color: transparent;

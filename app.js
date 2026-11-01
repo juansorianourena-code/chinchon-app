@@ -1,4 +1,5 @@
 // ===== Chinchón – Marcador =====
+const APP_VERSION = '1.1.0';
 const KEY = 'chinchon-data-v1';
 const DEFAULT_RULES = `🃏 NORMAS DEL CHINCHÓN
 
@@ -269,4 +270,27 @@ function viewRules() {
 }
 
 render();
-if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');
+$('#version').textContent = 'v' + APP_VERSION;
+
+// ---------- AUTO-ACTUALIZACIÓN ----------
+// Al abrir la app, al volver a ella y cada minuto: si hay versión nueva publicada,
+// borra todas las cachés, actualiza el service worker y recarga a la fuerza.
+async function checkUpdate() {
+  try {
+    const r = await fetch('version.json?t=' + Date.now(), { cache: 'no-store' });
+    const { version } = await r.json();
+    if (version && version !== APP_VERSION) {
+      if (sessionStorage.getItem('reloadedFor') === version) return; // evita bucles
+      sessionStorage.setItem('reloadedFor', version);
+      toast('🔄 Actualizando a v' + version + '…');
+      if (window.caches) for (const k of await caches.keys()) await caches.delete(k);
+      if (navigator.serviceWorker) for (const reg of await navigator.serviceWorker.getRegistrations()) await reg.unregister();
+      location.replace(location.pathname + '?v=' + version + '&t=' + Date.now());
+    }
+  } catch (e) { /* sin conexión: seguimos con la versión actual */ }
+}
+checkUpdate();
+document.addEventListener('visibilitychange', () => { if (!document.hidden) checkUpdate(); });
+window.addEventListener('focus', checkUpdate);
+setInterval(checkUpdate, 60000);
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' });
