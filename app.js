@@ -1,7 +1,7 @@
 // ===== Chinchón – Marcador =====
-const APP_VERSION = '1.1.0';
+const APP_VERSION = '1.2.0';
 const KEY = 'chinchon-data-v1';
-const DEFAULT_RULES = `🃏 NORMAS DEL CHINCHÓN
+const DEFAULT_RULES = `NORMAS DEL CHINCHÓN
 
 • Baraja española de 40 cartas. Se reparten 7 cartas a cada jugador.
 • Objetivo: ligar las cartas en tríos/cuartetos (mismo número) o escaleras (mismo palo, 3 o más seguidas).
@@ -14,7 +14,7 @@ const DEFAULT_RULES = `🃏 NORMAS DEL CHINCHÓN
 • Reenganche: el eliminado puede volver con los puntos del jugador que más tenga (máximo de reenganches acordado).
 • Gana el último jugador que queda.
 
-(Pulsa ✏️ Editar para cambiar estas normas)`;
+(Pulsa Editar para cambiar estas normas)`;
 
 let S = load();
 let tab = S.game ? 'play' : 'play';
@@ -50,19 +50,19 @@ let selGroup = null;
 function viewPlay() {
   const st = S.settings;
   if (!S.groups.length) return `<div class="hero"><img src="icon-192.png" alt="Chinchón"><h2>¡Bienvenido!</h2>
-    <p class="muted">Primero crea un grupo con los jugadores.</p><button id="go-groups" class="btn block" onclick="tab='groups';render();openGroupForm()">➕ Crear grupo</button></div>`;
+    <p class="muted">Primero crea un grupo con los jugadores.</p><button id="go-groups" class="btn block" onclick="tab='groups';render();openGroupForm()">Crear grupo</button></div>`;
   if (!selGroup || !S.groups.find(g => g.id === selGroup)) selGroup = S.groups[0].id;
   return `<div class="hero" style="padding:14px"><img src="icon-192.png" alt="Chinchón"></div>
   <h2>¿Quién juega?</h2>
-  ${S.groups.map(g => `<div class="card row between" onclick="selGroup='${g.id}';render()" style="cursor:pointer;${g.id === selGroup ? 'border-color:var(--gold);box-shadow:0 0 0 1px var(--gold)' : ''}">
-     <div><b>${esc(g.name)}</b><div class="muted">${g.players.map(esc).join(' · ')}</div></div><div>${g.id === selGroup ? '✅' : '⚪'}</div></div>`).join('')}
+  ${S.groups.map(g => `<div class="card row between" onclick="selGroup='${g.id}';render()" style="cursor:pointer;${g.id === selGroup ? 'border-color:var(--ink)' : ''}">
+     <div><b>${esc(g.name)}</b><div class="muted">${g.players.map(esc).join(' · ')}</div></div><div>${g.id === selGroup ? '<b style="color:var(--accent)">●</b>' : '<span class="muted">○</span>'}</div></div>`).join('')}
   <h2>Ajustes de la partida</h2>
   <div class="card">
     ${stepper('Límite de puntos (eliminado al pasarlo)', 'limit', st.limit, 5)}
     ${stepper('Reenganches permitidos por jugador', 'maxRejoins', st.maxRejoins, 1)}
     ${stepper('Puntos de penalización', 'penalty', st.penalty, 5)}
   </div>
-  <button id="btn-new-game" class="btn block" onclick="newGame()">🃏 Nueva partida</button>`;
+  <button id="btn-new-game" class="btn block" onclick="newGame()">Nueva partida</button>`;
 }
 function stepper(label, key, val, step) {
   return `<label>${label}</label><div class="stepper">
@@ -92,8 +92,8 @@ function viewGame() {
     const e = draft[i] || {}; const t = entryTotal(e, st.penalty);
     const rejLeft = st.maxRejoins - p.rejoins;
     return `<div class="player ${p.out ? 'out' : ''} ${!p.out && alive.length > 1 && p.score === minScore && G.rounds.length ? 'leader' : ''}">
-      <div class="row between"><span class="name">${!p.out && p.score === minScore && G.rounds.length ? '👑 ' : ''}${esc(p.name)}</span>
-        <div class="badges">${p.rejoins ? `<span class="badge">🔁 ${p.rejoins}</span>` : ''}${p.out ? '<span class="badge red">Eliminado</span>' : `<span class="badge">${rejLeft > 0 ? rejLeft + ' reeng.' : 'sin reeng.'}</span>`}</div></div>
+      <div class="row between"><span class="name">${!p.out && p.score === minScore && G.rounds.length ? '' : ''}${esc(p.name)}</span>
+        <div class="badges">${p.rejoins ? `<span class="badge">↻ ${p.rejoins}</span>` : ''}${p.out ? '<span class="badge red">Eliminado</span>' : `<span class="badge">${rejLeft > 0 ? rejLeft + ' reeng.' : 'sin reeng.'}</span>`}</div></div>
       <div class="row between"><div class="score" id="score-${i}">${p.score}</div><div class="muted">faltan ${Math.max(0, st.limit - p.score)}</div></div>
       <div class="bar"><i style="width:${Math.min(100, p.score / st.limit * 100)}%"></i></div>
       ${p.out ? '' : `<div class="entry"><input id="pts-${i}" type="number" inputmode="numeric" placeholder="Puntos de la mano" value="${e.pts ?? ''}" oninput="setPts(${i},this.value)">
@@ -101,14 +101,14 @@ function viewGame() {
       <div class="quick">
         <button class="${e.m10 ? 'on' : ''}" onclick="toggle(${i},'m10')">−10</button>
         <button class="${e.m25 ? 'on' : ''}" onclick="toggle(${i},'m25')">−25</button>
-        <button class="q-ch" onclick="chinchon(${i})">🃏 Chin.</button>
-        <button class="q-pen ${e.pen ? 'on' : ''}" onclick="penalty(${i})">⚠️ ${e.pen ? '×' + e.pen : '+' + st.penalty}</button>
+        <button class="q-ch" onclick="chinchon(${i})">Chinchón</button>
+        <button class="q-pen ${e.pen ? 'on' : ''}" onclick="penalty(${i})">${e.pen ? '×' + e.pen : '+' + st.penalty}</button>
       </div>`}
     </div>`;
   }).join('')}</div>
   <div class="sticky-actions">
     ${G.rounds.length ? '<button class="btn ghost" onclick="undoRound()">↩️</button>' : ''}
-    <button id="btn-close-round" class="btn block" onclick="closeRound()">✅ Apuntar ronda</button>
+    <button id="btn-close-round" class="btn block" onclick="closeRound()">Apuntar ronda</button>
   </div>
   ${G.rounds.length ? `<h2>Rondas</h2><div class="card"><table><tr><th>#</th>${G.players.map(p => `<th>${esc(p.name)}</th>`).join('')}</tr>
     ${G.rounds.map((r, n) => `<tr><td class="tag">${n + 1}</td>${r.totals.map((t, i) => `<td>${t === null ? '–' : (t > 0 ? '+' + t : t)}${r.events[i] ? `<div class="tag">${r.events[i]}</div>` : ''}</td>`).join('')}</tr>`).join('')}
@@ -123,12 +123,12 @@ function toggle(i, k) { draft[i] = { ...(draft[i] || {}) }; draft[i][k] = !draft
 function penalty(i) { draft[i] = { ...(draft[i] || {}) }; draft[i].pen = ((draft[i].pen || 0) + 1) % 4; vibrate(); render(); }
 function chinchon(i) {
   const p = S.game.players[i];
-  modal(`<div class="win"><div style="font-size:3rem">🃏</div><h2>¿Chinchón de ${esc(p.name)}?</h2><p class="muted">Gana la partida directamente.</p>
+  modal(`<div class="win"><div style="font-size:3rem"></div><h2>¿Chinchón de ${esc(p.name)}?</h2><p class="muted">Gana la partida directamente.</p>
     <div class="row"><button class="btn ghost block" onclick="closeModal()">Cancelar</button><button class="btn block" onclick="closeModal();doChinchon(${i})">¡Sí, chinchón!</button></div></div>`);
 }
 function doChinchon(i) {
   const G = S.game; G.players[i].chinchones++;
-  G.rounds.push({ before: JSON.parse(JSON.stringify(G.players)), totals: G.players.map((p, j) => p.out ? null : 0), events: G.players.map((p, j) => j === i ? '🃏 CHINCHÓN' : '') });
+  G.rounds.push({ before: JSON.parse(JSON.stringify(G.players)), totals: G.players.map((p, j) => p.out ? null : 0), events: G.players.map((p, j) => j === i ? 'CHINCHÓN' : '') });
   finishGame(i, 'chinchón');
 }
 function closeRound() {
@@ -139,7 +139,7 @@ function closeRound() {
     if (p.out) { totals.push(null); events.push(''); return; }
     const e = draft[i] || {}; const t = entryTotal(e, st.penalty);
     p.score += t; totals.push(t);
-    events.push([e.m10 && '−10', e.m25 && '−25', e.pen && '⚠️×' + e.pen].filter(Boolean).join(' '));
+    events.push([e.m10 && '−10', e.m25 && '−25', e.pen && '×' + e.pen].filter(Boolean).join(' '));
   });
   // Eliminaciones y reenganches
   const busted = G.players.filter(p => !p.out && p.score > st.limit);
@@ -148,13 +148,13 @@ function closeRound() {
   if (busted.length && !safe.length) {
     // todos se pasan a la vez: sigue el que menos tenga
     const min = Math.min(...busted.map(p => p.score));
-    busted.forEach(p => { if (p.score !== min) { p.out = true; msgs.push(`❌ ${p.name} eliminado`); } });
+    busted.forEach(p => { if (p.score !== min) { p.out = true; msgs.push(`✕ ${p.name} eliminado`); } });
   } else if (busted.length) {
     const top = Math.max(...safe.map(p => p.score));
     busted.forEach(p => {
       const i = G.players.indexOf(p);
-      if (p.rejoins < st.maxRejoins) { p.rejoins++; p.score = top; events[i] += ' 🔁'; msgs.push(`🔁 ¡${p.name} se reengancha con ${top}!`); }
-      else { p.out = true; events[i] += ' ❌'; msgs.push(`❌ ${p.name} eliminado`); }
+      if (p.rejoins < st.maxRejoins) { p.rejoins++; p.score = top; events[i] += ' ↻ '; msgs.push(`↻ ¡${p.name} se reengancha con ${top}!`); }
+      else { p.out = true; events[i] += ' ✕'; msgs.push(`✕ ${p.name} eliminado`); }
     });
   }
   G.rounds.push({ before, totals, events });
@@ -176,10 +176,10 @@ function abandonGame() {
 function finishGame(wi, how) {
   const G = S.game; G.winner = G.players[wi].name; G.how = how; G.end = Date.now();
   S.games.unshift(G); S.game = null; draft = {}; save(); render();
-  confetti(); vibrate([60, 40, 120]);
-  modal(`<div class="win"><div class="trophy">🏆</div><h2 style="font-size:1.6rem">¡Gana ${esc(G.winner)}!</h2>
+  vibrate([60, 40, 120]);
+  modal(`<div class="win"><div class="trophy">♠</div><h2 style="font-size:1.6rem">¡Gana ${esc(G.winner)}!</h2>
     <p class="muted">Por ${how} · ${G.rounds.length} rondas</p>
-    ${G.players.map(p => `<div class="rank"><span>${esc(p.name)}${p.rejoins ? ' 🔁' + p.rejoins : ''}</span><b>${p.score}</b></div>`).join('')}
+    ${G.players.map(p => `<div class="rank"><span>${esc(p.name)}${p.rejoins ? ' ↻ ' + p.rejoins : ''}</span><b>${p.score}</b></div>`).join('')}
     <div class="row" style="margin-top:14px"><button class="btn ghost block" onclick="closeModal();tab='history';render()">Historial</button>
     <button class="btn block" onclick="closeModal();selGroup='${G.groupId}';newGame()">Revancha</button></div></div>`);
 }
@@ -195,12 +195,12 @@ function confetti() {
 
 // ---------- GRUPOS ----------
 function viewGroups() {
-  return `<button id="btn-new-group" class="btn block" onclick="openGroupForm()">➕ Nuevo grupo</button><h2>Tus grupos</h2>
+  return `<button id="btn-new-group" class="btn block" onclick="openGroupForm()">Nuevo grupo</button><h2>Tus grupos</h2>
   ${S.groups.length ? S.groups.map(g => {
     const wins = winsFor(g.id);
     return `<div class="card"><div class="row between"><b>${esc(g.name)}</b>
-      <div class="row"><button class="btn ghost sm" onclick="openGroupForm('${g.id}')">✏️</button><button class="btn danger sm" onclick="delGroup('${g.id}')">🗑️</button></div></div>
-      ${g.players.map(p => `<div class="rank"><span>${esc(p)}</span><span class="muted">🏆 ${wins[p] || 0}</span></div>`).join('')}</div>`;
+      <div class="row"><button class="btn ghost sm" onclick="openGroupForm('${g.id}')">Editar</button><button class="btn danger sm" onclick="delGroup('${g.id}')">Borrar</button></div></div>
+      ${g.players.map(p => `<div class="rank"><span>${esc(p)}</span><span class="muted">${wins[p] || 0}</span></div>`).join('')}</div>`;
   }).join('') : '<div class="empty">Aún no hay grupos</div>'}`;
 }
 function openGroupForm(id) {
@@ -211,7 +211,7 @@ function openGroupForm(id) {
     <label>Jugadores (2 a 6)</label>
     ${_gp.map((p, i) => `<div class="row" style="margin-bottom:6px"><input id="g-p${i}" value="${esc(p)}" placeholder="Jugador ${i + 1}" oninput="_gp[${i}]=this.value">
       ${_gp.length > 2 ? `<button class="btn ghost sm" onclick="g_rm(${i})">✕</button>` : ''}</div>`).join('')}
-    ${_gp.length < 6 ? '<button class="btn ghost sm" onclick="g_add()">➕ Añadir jugador</button>' : ''}
+    ${_gp.length < 6 ? '<button class="btn ghost sm" onclick="g_add()">Añadir jugador</button>' : ''}
     <div class="row" style="margin-top:14px"><button class="btn ghost block" onclick="closeModal()">Cancelar</button>
     <button id="btn-save-group" class="btn block" onclick="saveGroup('${id || ''}')">Guardar</button></div>`);
   window.g_add = () => { g.name = $('#g-name').value; _gp.push(''); draw(); };
@@ -224,7 +224,7 @@ function saveGroup(id) {
   if (players.length < 2) return toast('Pon al menos 2 jugadores');
   if (id) Object.assign(S.groups.find(g => g.id === id), { name, players });
   else { const g = { id: uid(), name, players }; S.groups.push(g); selGroup = g.id; }
-  save(); closeModal(); render(); toast('Grupo guardado ✅');
+  save(); closeModal(); render(); toast('Grupo guardado ');
 }
 function delGroup(id) {
   modal(`<h2>¿Borrar grupo?</h2><p class="muted">El historial de partidas se mantiene.</p><div class="row">
@@ -237,24 +237,24 @@ let histFilter = '';
 function viewHistory() {
   const games = S.games.filter(g => !histFilter || g.groupId === histFilter);
   const w = Object.entries(winsFor(histFilter)).sort((a, b) => b[1] - a[1]);
-  const medals = ['🥇', '🥈', '🥉'];
+  const medals = ['1.', '2.', '3.'];
   return `<select onchange="histFilter=this.value;render()"><option value="">Todos los grupos</option>
     ${S.groups.map(g => `<option value="${g.id}" ${g.id === histFilter ? 'selected' : ''}>${esc(g.name)}</option>`).join('')}</select>
   ${w.length ? `<h2>Ranking de victorias</h2><div class="card">${w.map(([n, c], i) => `<div class="rank"><span>${medals[i] || '·'} ${esc(n)}</span><b>${c}</b></div>`).join('')}</div>` : ''}
   <h2>Partidas (${games.length})</h2>
   ${games.length ? games.map(g => `<div class="card" onclick="showGame('${g.id}')" style="cursor:pointer">
-    <div class="row between"><b>🏆 ${esc(g.winner)}</b><span class="muted">${new Date(g.date).toLocaleDateString('es-ES', { day: 'numeric', month: 'short', year: 'numeric' })}</span></div>
+    <div class="row between"><b>${esc(g.winner)}</b><span class="muted">${new Date(g.date).toLocaleDateString('es-ES', { day: 'numeric', month: 'short', year: 'numeric' })}</span></div>
     <div class="muted">${esc(g.groupName)} · ${g.rounds.length} rondas · ${g.how}</div>
     <div class="muted">${g.players.map(p => `${esc(p.name)} ${p.score}`).join(' · ')}</div></div>`).join('') : '<div class="empty">Todavía no habéis jugado ninguna partida</div>'}`;
 }
 function showGame(id) {
   const g = S.games.find(x => x.id === id);
   modal(`<h2>${esc(g.groupName)} – ${new Date(g.date).toLocaleString('es-ES', { dateStyle: 'medium', timeStyle: 'short' })}</h2>
-    <p>🏆 <b>${esc(g.winner)}</b> <span class="muted">(${g.how})</span></p>
+    <p><b>${esc(g.winner)}</b> <span class="muted">(${g.how})</span></p>
     <div style="max-height:45vh;overflow:auto"><table><tr><th>#</th>${g.players.map(p => `<th>${esc(p.name)}</th>`).join('')}</tr>
     ${g.rounds.map((r, n) => `<tr><td class="tag">${n + 1}</td>${r.totals.map((t, i) => `<td>${t === null ? '–' : t}${r.events[i] ? `<div class="tag">${r.events[i]}</div>` : ''}</td>`).join('')}</tr>`).join('')}
     <tr><th>Σ</th>${g.players.map(p => `<th>${p.score}</th>`).join('')}</tr></table></div>
-    <div class="row" style="margin-top:14px"><button class="btn danger block" onclick="S.games=S.games.filter(x=>x.id!=='${id}');save();closeModal();render()">🗑️ Borrar</button>
+    <div class="row" style="margin-top:14px"><button class="btn danger block" onclick="S.games=S.games.filter(x=>x.id!=='${id}');save();closeModal();render()">Borrar</button>
     <button class="btn block" onclick="closeModal()">Cerrar</button></div>`);
 }
 
@@ -263,14 +263,24 @@ let editingRules = false;
 function viewRules() {
   if (editingRules) return `<textarea id="rules-text">${esc(S.rules)}</textarea>
     <div class="row" style="margin-top:10px"><button class="btn ghost block" onclick="editingRules=false;render()">Cancelar</button>
-    <button id="btn-save-rules" class="btn block" onclick="S.rules=$('#rules-text').value;save();editingRules=false;render();toast('Normas guardadas ✅')">💾 Guardar</button></div>
+    <button id="btn-save-rules" class="btn block" onclick="S.rules=$('#rules-text').value;save();editingRules=false;render();toast('Normas guardadas ')">Guardar</button></div>
     <button class="btn ghost sm" style="margin-top:10px" onclick="$('#rules-text').value=DEFAULT_RULES">Restaurar normas por defecto</button>`;
-  return `<button id="btn-edit-rules" class="btn block" onclick="editingRules=true;render()">✏️ Editar normas</button>
+  return `<button id="btn-edit-rules" class="btn block" onclick="editingRules=true;render()">Editar normas</button>
     <div class="card rules-view" style="margin-top:12px">${esc(S.rules)}</div>`;
 }
 
 render();
-$('#version').textContent = 'v' + APP_VERSION;
+$('#version').textContent = 'v' + APP_VERSION + ' ↻';
+// Botón discreto: tocar la versión fuerza una recarga limpia (borra cachés, no borra datos)
+$('#version').onclick = () => modal(`<h2>Recargar la app</h2><p class="muted">Descarga de nuevo la última versión. Tus grupos, historial y normas no se borran.</p>
+  <div class="row"><button class="btn ghost block" onclick="closeModal()">Cancelar</button><button id="btn-hard-reload" class="btn block" onclick="hardReload()">Recargar</button></div>`);
+async function hardReload() {
+  try {
+    if (window.caches) for (const k of await caches.keys()) await caches.delete(k);
+    if (navigator.serviceWorker) for (const r of await navigator.serviceWorker.getRegistrations()) await r.unregister();
+  } catch (e) {}
+  location.replace(location.pathname + '?r=' + Date.now());
+}
 
 // ---------- AUTO-ACTUALIZACIÓN ----------
 // Al abrir la app, al volver a ella y cada minuto: si hay versión nueva publicada,
@@ -282,7 +292,7 @@ async function checkUpdate() {
     if (version && version !== APP_VERSION) {
       if (sessionStorage.getItem('reloadedFor') === version) return; // evita bucles
       sessionStorage.setItem('reloadedFor', version);
-      toast('🔄 Actualizando a v' + version + '…');
+      toast('Actualizando a v' + version + '…');
       if (window.caches) for (const k of await caches.keys()) await caches.delete(k);
       if (navigator.serviceWorker) for (const reg of await navigator.serviceWorker.getRegistrations()) await reg.unregister();
       location.replace(location.pathname + '?v=' + version + '&t=' + Date.now());
