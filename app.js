@@ -1,28 +1,34 @@
 // ===== Chinchón – Marcador =====
-const APP_VERSION = '1.2.0';
+const APP_VERSION = '1.3.0';
 const KEY = 'chinchon-data-v1';
-const DEFAULT_RULES = `NORMAS DEL CHINCHÓN
-
-• Baraja española de 40 cartas. Se reparten 7 cartas a cada jugador.
-• Objetivo: ligar las cartas en tríos/cuartetos (mismo número) o escaleras (mismo palo, 3 o más seguidas).
-• Se puede cerrar cuando las cartas sin ligar suman 3 puntos o menos.
-• Al cerrar, cada jugador suma los puntos de las cartas que no ha ligado (sota 10, caballo 11, rey 12).
-• Cerrar con todo ligado: −10 puntos.
-• Cerrar sin haber bajado nada antes: −25 puntos.
-• CHINCHÓN (escalera de 7 del mismo palo): gana la partida directamente.
-• Quien pasa de 100 puntos queda eliminado.
-• Reenganche: el eliminado puede volver con los puntos del jugador que más tenga (máximo de reenganches acordado).
-• Gana el último jugador que queda.
-
-(Pulsa Editar para cambiar estas normas)`;
+const OFFICIAL_RULES = [
+  ['La baraja', 'Se juega con baraja española de 40 cartas (sin ochos ni nueves). Pueden jugar de 2 a 6 jugadores.'],
+  ['El reparto', 'Se reparten 7 cartas a cada jugador, una a una. El resto queda boca abajo como mazo y se da la vuelta a la primera carta para empezar el montón de descartes. El reparto rota cada mano.'],
+  ['El turno', 'En su turno, cada jugador roba una carta (del mazo o la última del descarte) y después tira una carta al descarte. Siempre se queda con 7 cartas.'],
+  ['Las combinaciones', 'Se ligan cartas de dos formas: grupos de 3 o 4 cartas del mismo número, o escaleras de 3 o más cartas seguidas del mismo palo. Una carta solo puede estar en una combinación.'],
+  ['El valor de las cartas', 'Las cartas del 1 al 7 valen su número. Sota, caballo y rey valen 10 puntos cada una.'],
+  ['Cerrar', 'Se puede cerrar al tirar, cuando se tienen 6 cartas ligadas y la suelta vale 3 o menos (o todas ligadas). La carta de cierre se deja boca abajo. No se puede cerrar en la primera vuelta.'],
+  ['Colocar cartas', 'Cuando alguien cierra con una carta suelta, los demás enseñan sus combinaciones y pueden colocar sus cartas sueltas en las combinaciones del que ha cerrado.'],
+  ['La puntuación', 'Tras cada cierre, cada jugador suma los puntos de sus cartas sin ligar. El que cierra suma el valor de su carta suelta. Gana quien menos puntos acumula.'],
+  ['Menos diez', 'Si se cierra con las 7 cartas ligadas, se restan 10 puntos. En ese caso los demás no pueden colocar cartas.'],
+  ['Menos veinticinco', 'Según la casa, cerrar con una escalera de 7 usando comodín (o la variante acordada) resta 25 puntos.'],
+  ['El chinchón', 'Cerrar con una escalera de 7 cartas del mismo palo, sin comodín, es chinchón: se gana la partida al instante.'],
+  ['La eliminación', 'Quien pasa del límite de puntos acordado (normalmente 100) queda eliminado.'],
+  ['El reenganche', 'El eliminado puede reengancharse, volviendo con la misma puntuación que el jugador que más puntos tenga. El número de reenganches se acuerda antes de empezar.'],
+  ['El ganador', 'Gana la partida el último jugador que queda sin eliminar, o quien haga chinchón.']
+];
+const ORD = ['Primera', 'Segunda', 'Tercera', 'Cuarta', 'Quinta', 'Sexta', 'Séptima', 'Octava', 'Novena', 'Décima', 'Undécima', 'Duodécima', 'Decimotercera', 'Decimocuarta', 'Decimoquinta', 'Decimosexta', 'Decimoséptima', 'Decimoctava', 'Decimonovena', 'Vigésima'];
+const ordinal = i => ORD[i] || `Norma ${i + 1}`;
+const officialCopy = () => OFFICIAL_RULES.map(([title, text]) => ({ title, text }));
 
 let S = load();
-let tab = S.game ? 'play' : 'play';
+if (!S.rulesList) { S.rulesList = officialCopy(); save(); }
+let tab = 'play';
 let draft = {}; // entradas de la ronda en curso: { idx: {pts:'', m10, m25, pen} }
 
 function load() {
   try { const d = JSON.parse(localStorage.getItem(KEY)); if (d) return d; } catch (e) {}
-  return { groups: [], games: [], game: null, rules: DEFAULT_RULES, settings: { limit: 100, maxRejoins: 1, penalty: 10 } };
+  return { groups: [], games: [], game: null, rulesList: officialCopy(), settings: { limit: 100, maxRejoins: 1, penalty: 10 } };
 }
 function save() { localStorage.setItem(KEY, JSON.stringify(S)); }
 const $ = s => document.querySelector(s);
@@ -259,14 +265,49 @@ function showGame(id) {
 }
 
 // ---------- NORMAS ----------
-let editingRules = false;
+// Dos vistas: "Nuestras" (editables, una a una) y "Oficiales" (referencia fija).
+let rulesView = 'ours';
 function viewRules() {
-  if (editingRules) return `<textarea id="rules-text">${esc(S.rules)}</textarea>
-    <div class="row" style="margin-top:10px"><button class="btn ghost block" onclick="editingRules=false;render()">Cancelar</button>
-    <button id="btn-save-rules" class="btn block" onclick="S.rules=$('#rules-text').value;save();editingRules=false;render();toast('Normas guardadas ')">Guardar</button></div>
-    <button class="btn ghost sm" style="margin-top:10px" onclick="$('#rules-text').value=DEFAULT_RULES">Restaurar normas por defecto</button>`;
-  return `<button id="btn-edit-rules" class="btn block" onclick="editingRules=true;render()">Editar normas</button>
-    <div class="card rules-view" style="margin-top:12px">${esc(S.rules)}</div>`;
+  const seg = `<div class="seg"><button class="${rulesView === 'ours' ? 'on' : ''}" onclick="rulesView='ours';render()">Nuestras normas</button>
+    <button class="${rulesView === 'off' ? 'on' : ''}" onclick="rulesView='off';render()">Oficiales</button></div>`;
+  if (rulesView === 'off') return seg + `<p class="muted" style="margin:4px 0 14px">Reglamento clásico del chinchón. Solo lectura.</p>
+    ${OFFICIAL_RULES.map(([t, x], i) => ruleItem(i, t, x, false)).join('')}
+    <button class="btn ghost block" style="margin-top:10px" onclick="resetRules()">Usar las oficiales como nuestras</button>`;
+  const L = S.rulesList;
+  return seg + `<p class="muted" style="margin:4px 0 14px">Toca una norma para cambiarla.</p>
+    ${L.length ? L.map((r, i) => ruleItem(i, r.title, r.text, true)).join('') : '<div class="empty">No hay normas todavía</div>'}
+    <button id="btn-add-rule" class="btn block" style="margin-top:10px" onclick="editRule(-1)">Añadir norma</button>`;
+}
+function ruleItem(i, title, text, editable) {
+  return `<div class="rule" ${editable ? `onclick="editRule(${i})"` : ''}>
+    <div class="rule-n">${ordinal(i)}</div>
+    <div class="rule-t">${esc(title)}</div>
+    <div class="rule-x">${esc(text)}</div></div>`;
+}
+function editRule(i) {
+  const r = S.rulesList[i] || { title: '', text: '' }; const L = S.rulesList.length;
+  modal(`<h2>${i < 0 ? 'Nueva norma' : ordinal(i) + ' norma'}</h2>
+    <label>Título</label><input id="r-title" value="${esc(r.title)}" placeholder="Ej: El reenganche">
+    <label>Qué dice</label><textarea id="r-text" style="min-height:140px">${esc(r.text)}</textarea>
+    ${i >= 0 ? `<div class="row" style="margin-top:10px">
+      <button class="btn ghost sm" ${i === 0 ? 'disabled' : ''} onclick="moveRule(${i},-1)">↑ Subir</button>
+      <button class="btn ghost sm" ${i === L - 1 ? 'disabled' : ''} onclick="moveRule(${i},1)">↓ Bajar</button>
+      <span style="flex:1"></span><button class="btn danger sm" onclick="delRule(${i})">Borrar</button></div>` : ''}
+    <div class="row" style="margin-top:14px"><button class="btn ghost block" onclick="closeModal()">Cancelar</button>
+    <button id="btn-save-rule" class="btn block" onclick="saveRule(${i})">Guardar</button></div>`);
+}
+function saveRule(i) {
+  const title = $('#r-title').value.trim(), text = $('#r-text').value.trim();
+  if (!title && !text) return toast('Escribe algo');
+  if (i < 0) S.rulesList.push({ title, text }); else S.rulesList[i] = { title, text };
+  save(); closeModal(); render(); toast('Norma guardada');
+}
+function moveRule(i, d) { const L = S.rulesList; [L[i], L[i + d]] = [L[i + d], L[i]]; save(); render(); editRule(i + d); }
+function delRule(i) { S.rulesList.splice(i, 1); save(); closeModal(); render(); toast('Norma borrada'); }
+function resetRules() {
+  modal(`<h2>¿Sustituir vuestras normas?</h2><p class="muted">Se cambiarán por las oficiales. Lo que hayas escrito se perderá.</p>
+    <div class="row"><button class="btn ghost block" onclick="closeModal()">Cancelar</button>
+    <button class="btn block" onclick="S.rulesList=officialCopy();save();rulesView='ours';closeModal();render()">Sustituir</button></div>`);
 }
 
 render();
