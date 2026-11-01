@@ -1,5 +1,5 @@
 // ===== Chinchón – Marcador =====
-const APP_VERSION = '1.3.0';
+const APP_VERSION = '1.4.0';
 const KEY = 'chinchon-data-v1';
 const OFFICIAL_RULES = [
   ['La baraja', 'Se juega con baraja española de 40 cartas (sin ochos ni nueves). Pueden jugar de 2 a 6 jugadores.'],
@@ -81,7 +81,7 @@ function newGame() {
   const g = S.groups.find(x => x.id === selGroup); if (!g) return;
   S.game = {
     id: uid(), groupId: g.id, groupName: g.name, date: Date.now(), settings: { ...S.settings },
-    players: g.players.map(n => ({ name: n, score: 0, rejoins: 0, out: false, chinchones: 0 })), rounds: []
+    players: g.players.map(n => ({ name: n, score: 0, rejoins: 0, out: false, chinchones: 0 })), rounds: [], dealer: 0
   };
   draft = {}; save(); vibrate(30); render();
 }
@@ -92,14 +92,17 @@ function viewGame() {
   const G = S.game, st = G.settings;
   const alive = G.players.filter(p => !p.out);
   const minScore = Math.min(...alive.map(p => p.score));
+  const dealerIdx = G.dealer ?? 0;
+  const dealerPlayer = G.players[dealerIdx] || G.players[0] || { name: '–' };
   return `<div class="row between muted" style="margin-bottom:10px"><span>${esc(G.groupName)} · Ronda ${G.rounds.length + 1}</span>
     <span>Límite ${st.limit} · Reeng. ${st.maxRejoins}</span></div>
+  <div class="dealer" onclick="nextDealer()"><span class="muted">Reparte</span> <b>${esc(dealerPlayer.name)}</b> <span class="muted">· tocar para cambiar</span></div>
   <div class="players">${G.players.map((p, i) => {
     const e = draft[i] || {}; const t = entryTotal(e, st.penalty);
     const rejLeft = st.maxRejoins - p.rejoins;
     return `<div class="player ${p.out ? 'out' : ''} ${!p.out && alive.length > 1 && p.score === minScore && G.rounds.length ? 'leader' : ''}">
       <div class="row between"><span class="name">${!p.out && p.score === minScore && G.rounds.length ? '' : ''}${esc(p.name)}</span>
-        <div class="badges">${p.rejoins ? `<span class="badge">↻ ${p.rejoins}</span>` : ''}${p.out ? '<span class="badge red">Eliminado</span>' : `<span class="badge">${rejLeft > 0 ? rejLeft + ' reeng.' : 'sin reeng.'}</span>`}</div></div>
+        <div class="badges">${i === dealerIdx && !p.out ? '<span class="badge" style="border-color:var(--ink);color:var(--ink);font-weight:600">🂠 Reparte</span>' : ''}${p.rejoins ? `<span class="badge">↻ ${p.rejoins}</span>` : ''}${p.out ? '<span class="badge red">Eliminado</span>' : `<span class="badge">${rejLeft > 0 ? rejLeft + ' reeng.' : 'sin reeng.'}</span>`}</div></div>
       <div class="row between"><div class="score" id="score-${i}">${p.score}</div><div class="muted">faltan ${Math.max(0, st.limit - p.score)}</div></div>
       <div class="bar"><i style="width:${Math.min(100, p.score / st.limit * 100)}%"></i></div>
       ${p.out ? '' : `<div class="entry"><input id="pts-${i}" type="number" inputmode="numeric" placeholder="Puntos de la mano" value="${e.pts ?? ''}" oninput="setPts(${i},this.value)">
@@ -140,12 +143,13 @@ function doChinchon(i) {
 function closeRound() {
   const G = S.game, st = G.settings;
   const before = JSON.parse(JSON.stringify(G.players));
-  const totals = [], events = [];
+  const totals = [], events = [], flags = [];
   G.players.forEach((p, i) => {
     if (p.out) { totals.push(null); events.push(''); return; }
     const e = draft[i] || {}; const t = entryTotal(e, st.penalty);
     p.score += t; totals.push(t);
     events.push([e.m10 && '−10', e.m25 && '−25', e.pen && '×' + e.pen].filter(Boolean).join(' '));
+    flags[i] = { m10: !!e.m10, m25: !!e.m25, pen: e.pen || 0 };
   });
   // Eliminaciones y reenganches
   const busted = G.players.filter(p => !p.out && p.score > st.limit);
@@ -159,11 +163,14 @@ function closeRound() {
     const top = Math.max(...safe.map(p => p.score));
     busted.forEach(p => {
       const i = G.players.indexOf(p);
-      if (p.rejoins < st.maxRejoins) { p.rejoins++; p.score = top; events[i] += ' ↻ '; msgs.push(`↻ ¡${p.name} se reengancha con ${top}!`); }
-      else { p.out = true; events[i] += ' ✕'; msgs.push(`✕ ${p.name} eliminado`); }
+      if (p.rejoins < st.maxRejoins) { p.rejoins++; p.score = top; events[i] += ' ↻ '; msgs.push(pick(TAUNT_REJOIN)(p.name, top)); }
+      else { p.out = true; events[i] += ' ✕'; msgs.push(pick(TAUNT_OUT)(p.name)); }
     });
   }
-  G.rounds.push({ before, totals, events });
+  // pique: alguien al borde
+  if (!msgs.length) G.players.forEach((p, i) => { if (!p.out && st.limit - p.score <= 10 && totals[i] > 0) msgs.push(pick(TAUNT_EDGE)(p.name, st.limit - p.score)); });
+  G.rounds.push({ before, totals, events, flags, dealer: G.dealer ?? 0 });
+  advanceDealer();
   draft = {}; save(); vibrate(25);
   const alive = G.players.filter(p => !p.out);
   if (alive.length === 1) return finishGame(G.players.indexOf(alive[0]), 'último en pie');
@@ -173,8 +180,33 @@ function closeRound() {
 }
 function undoRound() {
   const G = S.game; const r = G.rounds.pop(); if (!r) return;
-  G.players = r.before; save(); toast('Ronda deshecha'); render();
+  G.players = r.before; if (r.dealer !== undefined) G.dealer = r.dealer; save(); toast('Ronda deshecha'); render();
 }
+function advanceDealer() {
+  const G = S.game; if (!G || !G.players || !G.players.length) return;
+  const n = G.players.length; let d = G.dealer ?? 0;
+  for (let k = 0; k < n; k++) { d = (d + 1) % n; if (!G.players[d].out) break; }
+  G.dealer = d;
+}
+function nextDealer() { advanceDealer(); save(); render(); vibrate(); }
+const pick = a => a[Math.floor(Math.random() * a.length)];
+const TAUNT_REJOIN = [
+  (n, t) => `${n} se reengancha con ${t}. Vida extra.`,
+  (n, t) => `${n} vuelve con ${t}. Que no se acostumbre.`,
+  (n, t) => `${n} paga y vuelve a la mesa con ${t}.`,
+  (n, t) => `Resucita ${n}, con ${t}. A ver cuánto dura.`
+];
+const TAUNT_OUT = [
+  n => `${n}, eliminado. Ya puedes ir haciendo café.`,
+  n => `Se acabó para ${n}. Descanse en paz.`,
+  n => `${n} fuera. Sin reenganches que valgan.`,
+  n => `${n} eliminado. Otra vez será.`
+];
+const TAUNT_EDGE = [
+  (n, f) => `${n} está con la soga al cuello: le faltan ${f}.`,
+  (n, f) => `Ojo con ${n}, a ${f} de la calle.`,
+  (n, f) => `${n} tiembla: solo le quedan ${f} puntos.`
+];
 function abandonGame() {
   modal(`<h2>¿Abandonar partida?</h2><p class="muted">No se guardará en el historial.</p>
     <div class="row"><button class="btn ghost block" onclick="closeModal()">No</button><button class="btn danger block" onclick="S.game=null;draft={};save();closeModal();render()">Sí, abandonar</button></div>`);

@@ -118,6 +118,15 @@ td.tag, .tag { font-size: .68rem; color: var(--ink2); }
 .confetti { position: fixed; top: -10px; width: 6px; height: 10px; z-index: 45; animation: fall linear forwards; }
 @keyframes fall { to { transform: translateY(110vh) rotate(540deg); } }
 
+/* Repartidor */
+.dealer {
+  display: flex; justify-content: space-between; align-items: center;
+  background: var(--paper2); border: 1px dashed var(--line); border-radius: 4px;
+  padding: 8px 12px; margin-bottom: 12px; font-size: .88rem; cursor: pointer;
+}
+.dealer:active { background: var(--line); }
+.dealer b { color: var(--ink); }
+
 /* Normas numeradas */
 .seg { display: flex; border: 1px solid var(--ink); border-radius: 4px; overflow: hidden; margin-bottom: 8px; }
 .seg button { flex: 1; font: inherit; font-weight: 600; font-size: .88rem; padding: 10px; border: 0; background: transparent; color: var(--ink); }
