@@ -1,5 +1,5 @@
 // ===== Chinchón – Marcador =====
-const APP_VERSION = '1.7.0';
+const APP_VERSION = '1.8.0';
 const KEY = 'chinchon-data-v1';
 const OFFICIAL_RULES = [
   ['La baraja', 'Se juega con baraja española de 40 cartas (sin ochos ni nueves). Pueden jugar de 2 a 6 jugadores.'],
@@ -38,10 +38,15 @@ const DEFAULT_ADMIN_CONFIG = {
   customSignature: 'Marcador de Chinchón',
   soundEnabled: true,
   vibrateEnabled: true,
-  wakeLock: true
+  wakeLock: true,
+  askRejoin: true,
+  tauntsEnabled: true,
+  edgeThreshold: 10
 };
+const CLIENT_ID = 'c' + Math.random().toString(36).slice(2, 10);
 
 let S = load();
+Object.defineProperty(window, 'cfg', { get: () => S.adminConfig, configurable: true }); // para los interruptores del panel
 if (!S.rulesList) { S.rulesList = officialCopy(); save(); }
 let tab = 'play';
 let draft = {}; // entradas de la ronda en curso: { idx: {pts:'', m10, m25, pen} }
@@ -85,8 +90,22 @@ function render() {
   const titles = { play: S.game ? 'Partida en juego' : 'Chinchón', groups: 'Grupos', history: 'Historial', rules: 'Normas' };
   $('#title').textContent = titles[tab];
   const v = $('#view');
+  // Conservar el foco y el cursor si alguien está escribiendo (evita que se corte la escritura)
+  const ae = document.activeElement;
+  const focusId = ae && ae.id && v.contains(ae) ? ae.id : null;
+  const selStart = focusId && ae.selectionStart !== undefined ? ae.selectionStart : null;
+  const selEnd = focusId && ae.selectionEnd !== undefined ? ae.selectionEnd : null;
+  const scrollY = window.scrollY;
   v.style.animation = 'none'; v.offsetHeight; v.style.animation = '';
   v.innerHTML = { play: S.game ? viewGame : viewPlay, groups: viewGroups, history: viewHistory, rules: viewRules }[tab]();
+  if (focusId) {
+    const el = document.getElementById(focusId);
+    if (el) {
+      el.focus();
+      try { if (selStart !== null && el.setSelectionRange) el.setSelectionRange(selStart, selEnd); } catch (e) {}
+    }
+    window.scrollTo(0, scrollY);
+  }
 }
 
 // ---------- JUGAR ----------
@@ -225,14 +244,14 @@ function viewGame() {
     ${G.players[myPlayerIndex].out ? '<div class="badge red" style="display:block;text-align:center;padding:8px">Estás eliminado de esta partida</div>' : `
       <label>Apunta tus puntos de esta mano:</label>
       <div class="entry"><input id="guest-pts" type="number" inputmode="numeric" placeholder="Puntos mano" value="${(draft[myPlayerIndex] || {}).pts ?? ''}" oninput="setPts(${myPlayerIndex},this.value);submitGuestPts()">
-        <div class="pending">${entryTotal(draft[myPlayerIndex] || {}, st.penalty) > 0 ? '+' + entryTotal(draft[myPlayerIndex] || {}, st.penalty) : entryTotal(draft[myPlayerIndex] || {}, st.penalty)}</div></div>
+        <div class="pending" id="pend-${myPlayerIndex}">${entryTotal(draft[myPlayerIndex] || {}, st.penalty) > 0 ? '+' + entryTotal(draft[myPlayerIndex] || {}, st.penalty) : entryTotal(draft[myPlayerIndex] || {}, st.penalty)}</div></div>
       <div class="quick">
         <button class="${(draft[myPlayerIndex] || {}).m10 ? 'on' : ''}" onclick="toggle(${myPlayerIndex},'m10');submitGuestPts()">−10</button>
         <button class="${(draft[myPlayerIndex] || {}).m25 ? 'on' : ''}" onclick="toggle(${myPlayerIndex},'m25');submitGuestPts()">−25</button>
         <button class="q-ch" onclick="chinchon(${myPlayerIndex})">Chinchón</button>
         <button class="q-pen ${(draft[myPlayerIndex] || {}).pen ? 'on' : ''}" onclick="penalty(${myPlayerIndex});submitGuestPts()">${(draft[myPlayerIndex] || {}).pen ? '×' + (draft[myPlayerIndex] || {}).pen : '+' + st.penalty}</button>
       </div>
-      <button class="btn block" style="margin-top:10px" onclick="submitGuestPts()">✅ Enviar mis puntos a la mesa</button>
+      <div class="muted" style="text-align:center;margin-top:8px;font-size:.8rem"><i class="live-dot"></i>Tus puntos se envían solos a la mesa mientras escribes</div>
       <button class="btn btn-bell block" style="margin-top:8px" onclick="triggerCloseBell()">🔔 ¡He cerrado la mano!</button>
     `}
   </div>` : '';
@@ -291,6 +310,7 @@ function setPts(i, v) {
 function toggle(i, k) { draft[i] = { ...(draft[i] || {}) }; draft[i][k] = !draft[i][k]; if (k === 'm10' && draft[i].m10) draft[i].m25 = false; if (k === 'm25' && draft[i].m25) draft[i].m10 = false; vibrate(); render(); }
 function penalty(i) { draft[i] = { ...(draft[i] || {}) }; draft[i].pen = ((draft[i].pen || 0) + 1) % 4; vibrate(); render(); }
 function chinchon(i) {
+  if (!isHost) return toast('Avisa a Juan: el Chinchón lo valida el administrador');
   const p = S.game.players[i];
   modal(`<div class="win"><div style="font-size:3rem"></div><h2>¿Chinchón de ${esc(p.name)}?</h2><p class="muted">Gana la partida directamente.</p>
     <div class="row"><button class="btn ghost block" onclick="closeModal()">Cancelar</button><button class="btn block" onclick="closeModal();doChinchon(${i})">¡Sí, chinchón!</button></div></div>`);
@@ -301,8 +321,9 @@ function doChinchon(i) {
   finishGame(i, 'chinchón');
 }
 function closeRound() {
-  const G = S.game, st = G.settings;
-  const before = JSON.parse(JSON.stringify(G.players));
+  // Trabajamos sobre una copia: si se cancela la ronda no se toca nada
+  const G = JSON.parse(JSON.stringify(S.game)), st = G.settings;
+  const before = JSON.parse(JSON.stringify(S.game.players));
   const totals = [], events = [], flags = [];
   G.players.forEach((p, i) => {
     if (p.out) { totals.push(null); events.push(''); return; }
@@ -311,24 +332,70 @@ function closeRound() {
     events.push([e.m10 && '−10', e.m25 && '−25', e.pen && '×' + e.pen].filter(Boolean).join(' '));
     flags[i] = { m10: !!e.m10, m25: !!e.m25, pen: e.pen || 0 };
   });
-  // Eliminaciones y reenganches
+  const ctx = { G, before, totals, events, flags, msgs: [] };
   const busted = G.players.filter(p => !p.out && p.score > st.limit);
   const safe = G.players.filter(p => !p.out && p.score <= st.limit);
-  const msgs = [];
   if (busted.length && !safe.length) {
     // todos se pasan a la vez: sigue el que menos tenga
     const min = Math.min(...busted.map(p => p.score));
-    busted.forEach(p => { if (p.score !== min) { p.out = true; msgs.push(`✕ ${p.name} eliminado`); } });
-  } else if (busted.length) {
-    const top = Math.max(...safe.map(p => p.score));
-    busted.forEach(p => {
-      const i = G.players.indexOf(p);
-      if (p.rejoins < st.maxRejoins) { p.rejoins++; p.score = top; events[i] += ' ↻ '; msgs.push(pick(TAUNT_REJOIN)(p.name, top)); }
-      else { p.out = true; events[i] += ' ✕'; msgs.push(pick(TAUNT_OUT)(p.name)); }
-    });
+    busted.forEach(p => { if (p.score !== min) { p.out = true; ctx.msgs.push(`✕ ${p.name} eliminado`); } });
+    return finalizeRound(ctx);
   }
+  if (busted.length) {
+    const top = Math.max(...safe.map(p => p.score));
+    return askRejoin(ctx, busted.slice(), top);
+  }
+  finalizeRound(ctx);
+}
+
+// Pregunta uno a uno si el jugador que se ha pasado quiere reengancharse
+function askRejoin(ctx, queue, top) {
+  const G = ctx.G, st = G.settings, cfg = S.adminConfig || {};
+  while (queue.length) {
+    const p = queue[0], i = G.players.findIndex(x => x.name === p.name);
+    const taunt = cfg.tauntsEnabled !== false;
+    if (p.rejoins >= st.maxRejoins) {
+      p.out = true; ctx.events[i] += ' ✕'; ctx.msgs.push(taunt ? pick(TAUNT_OUT)(p.name) : `✕ ${p.name} eliminado`);
+      queue.shift(); continue;
+    }
+    if (cfg.askRejoin === false) {
+      p.rejoins++; p.score = top; ctx.events[i] += ' ↻ '; ctx.msgs.push(taunt ? pick(TAUNT_REJOIN)(p.name, top) : `↻ ${p.name} se reengancha con ${top}`);
+      queue.shift(); continue;
+    }
+    window._rejoinCtx = { ctx, queue, top };
+    const cost = st.potPerEntry > 0 ? `<p class="muted">Reenganche: <b>+${Number(st.potPerEntry).toFixed(2)} €</b> al bote</p>` : '';
+    modal(`<div class="win"><div style="font-size:2.4rem">↻</div>
+      <h2>¿${esc(p.name)} se quiere reenganchar?</h2>
+      <p class="muted">Se ha pasado con <b>${p.score}</b> (límite ${st.limit}).<br>Si se reengancha vuelve con <b>${top}</b> puntos.
+      Reenganches: ${p.rejoins}/${st.maxRejoins}.</p>${cost}
+      <div class="row" style="margin-top:14px">
+        <button class="btn danger block" onclick="answerRejoin(false)">No, eliminar</button>
+        <button class="btn block" onclick="answerRejoin(true)">Sí, reenganchar</button>
+      </div>
+      <button class="btn ghost block" style="margin-top:8px" onclick="closeModal();toast('Ronda cancelada: no se ha apuntado nada')">Cancelar ronda</button></div>`);
+    return;
+  }
+  finalizeRound(ctx);
+}
+
+function answerRejoin(yes) {
+  const r = window._rejoinCtx; if (!r) return;
+  const { ctx, queue, top } = r, G = ctx.G, cfg = S.adminConfig || {};
+  const p = queue.shift(), i = G.players.findIndex(x => x.name === p.name);
+  const taunt = cfg.tauntsEnabled !== false;
+  if (yes) { p.rejoins++; p.score = top; ctx.events[i] += ' ↻ '; ctx.msgs.push(taunt ? pick(TAUNT_REJOIN)(p.name, top) : `↻ ${p.name} se reengancha con ${top}`); }
+  else { p.out = true; ctx.events[i] += ' ✕'; ctx.msgs.push(taunt ? pick(TAUNT_OUT)(p.name) : `✕ ${p.name} eliminado`); }
+  closeModal();
+  askRejoin(ctx, queue, top);
+}
+
+function finalizeRound(ctx) {
+  const { G, before, totals, events, flags, msgs } = ctx;
+  const st = G.settings, cfg = S.adminConfig || {};
+  S.game = G;
   // pique: alguien al borde
-  if (!msgs.length) G.players.forEach((p, i) => { if (!p.out && st.limit - p.score <= 10 && totals[i] > 0) msgs.push(pick(TAUNT_EDGE)(p.name, st.limit - p.score)); });
+  const edge = cfg.edgeThreshold ?? 10;
+  if (cfg.tauntsEnabled !== false && !msgs.length) G.players.forEach((p, i) => { if (!p.out && st.limit - p.score <= edge && totals[i] > 0) msgs.push(pick(TAUNT_EDGE)(p.name, st.limit - p.score)); });
   G.rounds.push({ before, totals, events, flags, dealer: G.dealer ?? 0 });
   advanceDealer();
   draft = {}; remoteDrafts = {}; save(); vibrate(25);
@@ -454,6 +521,7 @@ function fallbackHiveMqtt(roomCode, onConnect) {
 function sendMqtt(data) {
   if (!mqttClient || !mqttClient.isConnected || !mqttClient.isConnected() || !currentRoomCode) return;
   try {
+    data.from = CLIENT_ID;
     const m = new Paho.MQTT.Message(JSON.stringify(data));
     m.destinationName = `chinchon/v1/${currentRoomCode}`;
     m.qos = 1;
@@ -463,10 +531,20 @@ function sendMqtt(data) {
 
 function handleMqttMsg(d) {
   if (!d || !d.type) return;
+  if (d.from && d.from === CLIENT_ID) return; // ignorar el eco de mis propios mensajes
   if (d.type === 'sync') {
     if (!isHost || (!S.game && d.game)) {
+      const prevRounds = S.game ? S.game.rounds.length : -1;
+      const myOld = myPlayerIndex !== null ? draft[myPlayerIndex] : undefined;
       S.game = d.game;
-      if (d.draft) draft = { ...draft, ...d.draft };
+      if (d.game && d.game.rounds.length !== prevRounds) {
+        // ronda nueva o deshecha: borrador limpio
+        draft = { ...(d.draft || {}) };
+      } else {
+        draft = { ...draft, ...(d.draft || {}) };
+        // lo que yo estoy escribiendo manda sobre lo que llegue de la mesa
+        if (myPlayerIndex !== null && myOld !== undefined) draft[myPlayerIndex] = myOld;
+      }
       syncMyPlayerIndex();
       save();
       render();
@@ -493,9 +571,16 @@ function handleMqttMsg(d) {
       remoteDrafts[d.playerIndex] = true;
       if (isHost) {
         save();
-        sendMqtt({ type: 'sync', game: S.game, draft });
+        // sin eco de sync: los demás ven el borrador en directo sin que se les recargue la pantalla
+        sendMqtt({ type: 'draftSync', draft });
       }
-      toast(`✓ ${d.playerName}: ${entryTotal(d.entry, S.game.settings.penalty)} pts`);
+      render();
+    }
+  } else if (d.type === 'draftSync') {
+    if (!isHost && d.draft) {
+      const mine = myPlayerIndex !== null ? draft[myPlayerIndex] : undefined;
+      draft = { ...d.draft };
+      if (mine !== undefined) draft[myPlayerIndex] = mine;
       render();
     }
   } else if (d.type === 'bell') {
@@ -652,12 +737,18 @@ function openWaShare(encodedText, phone = '') {
   window.open(url, '_blank');
 }
 
-function submitGuestPts() {
+let _liveTimer = null;
+function sendGuestDraftNow() {
   if (myPlayerIndex === null || !S.game) return;
   const e = draft[myPlayerIndex] || {};
   sendMqtt({ type: 'draft', playerIndex: myPlayerIndex, playerName: myPlayerName, entry: e });
-  toast(`✓ Puntos de ${myPlayerName} enviados a la mesa`);
-  vibrate(25);
+}
+// Envío en directo: cada cambio (cada número tecleado o botón) se manda casi al instante
+function submitGuestPts(manual) {
+  if (myPlayerIndex === null || !S.game) return;
+  clearTimeout(_liveTimer);
+  if (manual === true) { sendGuestDraftNow(); toast(`✓ Puntos de ${myPlayerName} enviados a la mesa`); vibrate(25); return; }
+  _liveTimer = setTimeout(sendGuestDraftNow, 120);
 }
 
 function calculateTitles(G) {
@@ -822,13 +913,56 @@ function openAdminSettings(tabName) {
   // Vista completa de Juan (Administrador)
   const tabs = [
     ['room', '🎮 Mesa'],
+    ['game', '🎲 Partida'],
     ['pot', '💰 Apuestas'],
     ['messages', '💬 WhatsApp'],
     ['system', '⚙️ General']
   ];
 
   let body = '';
-  if (adminCurrentTab === 'room') {
+  if (adminCurrentTab === 'game') {
+    if (!G) {
+      body = `<div class="card empty" style="text-align:center;padding:24px"><p>No hay partida en juego.</p><span class="muted" style="font-size:.85rem">Aquí podrás cambiar límite, reenganches, puntos de cada jugador, repartidor… en plena partida.</span></div>`;
+    } else {
+      const st = G.settings;
+      const stp = (label, key, val, step, fmt) => `<div class="cfg-row"><div class="cfg-title">${label}</div>
+        <div class="row" style="gap:6px"><button class="btn ghost sm" onclick="adminSet('${key}',${-step})">−</button><b style="min-width:62px;text-align:center">${fmt ? fmt(val) : val}</b><button class="btn ghost sm" onclick="adminSet('${key}',${step})">+</button></div></div>`;
+      body = `
+        <label>Reglas de esta partida (cambian al instante)</label>
+        <div class="card" style="padding:4px 12px;margin-bottom:12px">
+          ${stp('Límite de puntos', 'limit', st.limit, 5)}
+          ${stp('Reenganches por jugador', 'maxRejoins', st.maxRejoins, 1)}
+          ${stp('Puntos de penalización', 'penalty', st.penalty, 5)}
+          ${stp('Bote por entrada (€)', 'potPerEntry', st.potPerEntry || 0, 0.5, v => v > 0 ? v.toFixed(2) + ' €' : 'Sin bote')}
+        </div>
+        <div class="card" style="padding:4px 12px;margin-bottom:12px">
+          <div class="cfg-row"><div><div class="cfg-title">Preguntar antes de reenganchar</div><div class="cfg-desc">Si lo apagas, se reengancha solo</div></div>
+            <label class="switch"><input type="checkbox" ${cfg.askRejoin !== false ? 'checked' : ''} onchange="S.adminConfig.askRejoin=this.checked;save()"><span class="slider"></span></label></div>
+          <div class="cfg-row"><div><div class="cfg-title">Frases de pique</div><div class="cfg-desc">Mensajes al eliminar, reenganchar o estar al borde</div></div>
+            <label class="switch"><input type="checkbox" ${cfg.tauntsEnabled !== false ? 'checked' : ''} onchange="S.adminConfig.tauntsEnabled=this.checked;save()"><span class="slider"></span></label></div>
+          ${(() => { const v = cfg.edgeThreshold ?? 10; return `<div class="cfg-row"><div class="cfg-title">Aviso "al borde" a menos de</div>
+            <div class="row" style="gap:6px"><button class="btn ghost sm" onclick="adminEdge(-5)">−</button><b style="min-width:62px;text-align:center">${v} pts</b><button class="btn ghost sm" onclick="adminEdge(5)">+</button></div></div>`; })()}
+        </div>
+        <label>Repartidor</label>
+        <select onchange="adminSetDealer(this.value)" style="margin-bottom:12px">
+          ${G.players.map((p, i) => `<option value="${i}" ${i === (G.dealer ?? 0) ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}
+        </select>
+        <label>Jugadores (puntos, reenganches, estado)</label>
+        ${G.players.map((p, i) => `
+          <div class="card" style="padding:8px 12px;margin-bottom:8px">
+            <input value="${esc(p.name)}" style="margin-bottom:6px" onchange="adminRename(${i},this.value)">
+            <div class="row between" style="margin-bottom:6px"><span class="muted">Puntos: <b>${p.score}</b></span>
+              <div class="row" style="gap:4px"><button class="btn ghost sm" onclick="adminScore(${i},-10)">−10</button><button class="btn ghost sm" onclick="adminScore(${i},-1)">−1</button><button class="btn ghost sm" onclick="adminScore(${i},1)">+1</button><button class="btn ghost sm" onclick="adminScore(${i},10)">+10</button></div></div>
+            <div class="row between"><span class="muted">Reenganches: <b>${p.rejoins}</b></span>
+              <div class="row" style="gap:4px"><button class="btn ghost sm" onclick="adminRejoin(${i},-1)">−</button><button class="btn ghost sm" onclick="adminRejoin(${i},1)">+</button>
+              <button class="btn ${p.out ? '' : 'danger'} sm" onclick="adminToggleOut(${i})">${p.out ? 'Reactivar' : 'Eliminar'}</button></div></div>
+          </div>`).join('')}
+        <div class="row" style="margin-bottom:12px"><input id="adm-new-player" placeholder="Añadir jugador a la partida"><button class="btn sm" onclick="adminAddPlayer()">＋</button></div>
+        <button class="btn ghost block" style="margin-bottom:8px" onclick="adminClearDraft()">🧹 Vaciar puntos escritos de la ronda</button>
+        <button class="btn danger block" onclick="adminFinishNow()">🏁 Terminar la partida ahora</button>
+      `;
+    }
+  } else if (adminCurrentTab === 'room') {
     if (G && G.players && G.players.length) {
       body = `
         <p class="muted" style="margin-bottom:12px">Control en vivo de los jugadores de la mesa actual (${esc(G.groupName)} · ${G.roomCode || 'Local'}):</p>
@@ -945,6 +1079,43 @@ function openAdminSettings(tabName) {
       <button class="btn block" onclick="closeModal();render()">Guardar y cerrar</button>
     </div>
   `);
+}
+
+// ----- Ajustes en vivo de la partida (solo administrador) -----
+function adminCommit(reopen) {
+  save();
+  sendMqtt({ type: 'sync', game: S.game, draft });
+  render();
+  openAdminSettings(reopen || 'game');
+}
+function adminSet(key, d) {
+  const G = S.game; if (!G) return;
+  G.settings[key] = Math.max(key === 'limit' ? 5 : 0, Math.round(((G.settings[key] || 0) + d) * 100) / 100);
+  adminCommit();
+}
+function adminEdge(d) { S.adminConfig.edgeThreshold = Math.max(0, (S.adminConfig.edgeThreshold ?? 10) + d); save(); openAdminSettings('game'); }
+function adminSetDealer(i) { S.game.dealer = parseInt(i) || 0; adminCommit(); }
+function adminRename(i, v) {
+  const name = (v || '').trim(); if (!name) return openAdminSettings('game');
+  S.game.players[i].name = name; adminCommit();
+}
+function adminScore(i, d) { const p = S.game.players[i]; p.score = Math.max(0, p.score + d); adminCommit(); }
+function adminRejoin(i, d) { const p = S.game.players[i]; p.rejoins = Math.max(0, p.rejoins + d); adminCommit(); }
+function adminToggleOut(i) { const p = S.game.players[i]; p.out = !p.out; adminCommit(); }
+function adminAddPlayer() {
+  const name = ($('#adm-new-player').value || '').trim(); if (!name) return toast('Escribe un nombre');
+  if (S.game.players.length >= 8) return toast('Máximo 8 jugadores');
+  S.game.players.push({ name, score: 0, rejoins: 0, out: false, chinchones: 0 });
+  adminCommit();
+}
+function adminClearDraft() { draft = {}; remoteDrafts = {}; adminCommit(); toast('Puntos de la ronda vaciados'); }
+function adminFinishNow() {
+  const G = S.game; if (!G) return;
+  const alive = G.players.filter(p => !p.out);
+  const pool = alive.length ? alive : G.players;
+  const best = pool.reduce((a, b) => (b.score < a.score ? b : a));
+  closeModal();
+  finishGame(G.players.indexOf(best), 'terminada por el administrador');
 }
 
 function setAdminName(val) {
