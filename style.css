@@ -217,3 +217,11 @@ input:checked + .slider:before { transform: translateX(20px); }
 .rule-t { font-family: var(--serif); font-size: 1.2rem; font-weight: 600; margin: 2px 0 4px; }
 .rule-x { font-size: .95rem; line-height: 1.55; color: var(--ink2); white-space: pre-wrap; }
 .btn:disabled { opacity: .3; }
+
+/* Modo oscuro */
+body.dark { --paper: #1b1a17; --paper2: #26241f; --ink: #f1ede4; --ink2: #aaa294; --line: #3a372f; --accent: #e0765f; --ok: #5fb585; }
+body.dark .card, body.dark .guest-panel { background: #24221e; }
+body.dark .live-bar { background: #1f2e25; color: #bfe6cd; }
+body.dark .pot-card { background: #2d2818; border-color: #5a4d22; }
+body.dark input, body.dark select, body.dark textarea { background: #2b2924; color: var(--ink); border-color: var(--line); }
+body.dark .btn.ghost { color: var(--ink); }

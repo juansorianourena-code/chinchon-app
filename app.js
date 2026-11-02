@@ -1,5 +1,5 @@
 // ===== Chinchón – Marcador =====
-const APP_VERSION = '1.8.0';
+const APP_VERSION = '1.9.0';
 const KEY = 'chinchon-data-v1';
 const OFFICIAL_RULES = [
   ['La baraja', 'Se juega con baraja española de 40 cartas (sin ochos ni nueves). Pueden jugar de 2 a 6 jugadores.'],
@@ -243,15 +243,17 @@ function viewGame() {
     </div>
     ${G.players[myPlayerIndex].out ? '<div class="badge red" style="display:block;text-align:center;padding:8px">Estás eliminado de esta partida</div>' : `
       <label>Apunta tus puntos de esta mano:</label>
-      <div class="entry"><input id="guest-pts" type="number" inputmode="numeric" placeholder="Puntos mano" value="${(draft[myPlayerIndex] || {}).pts ?? ''}" oninput="setPts(${myPlayerIndex},this.value);submitGuestPts()">
+      <div class="entry"><input id="guest-pts" type="number" inputmode="numeric" placeholder="Puntos mano" value="${(draft[myPlayerIndex] || {}).pts ?? ''}" oninput="setPts(${myPlayerIndex},this.value);guestTyping()">
         <div class="pending" id="pend-${myPlayerIndex}">${entryTotal(draft[myPlayerIndex] || {}, st.penalty) > 0 ? '+' + entryTotal(draft[myPlayerIndex] || {}, st.penalty) : entryTotal(draft[myPlayerIndex] || {}, st.penalty)}</div></div>
       <div class="quick">
-        <button class="${(draft[myPlayerIndex] || {}).m10 ? 'on' : ''}" onclick="toggle(${myPlayerIndex},'m10');submitGuestPts()">−10</button>
-        <button class="${(draft[myPlayerIndex] || {}).m25 ? 'on' : ''}" onclick="toggle(${myPlayerIndex},'m25');submitGuestPts()">−25</button>
+        <button class="${(draft[myPlayerIndex] || {}).m10 ? 'on' : ''}" onclick="toggle(${myPlayerIndex},'m10');guestTyping()">−10</button>
+        <button class="${(draft[myPlayerIndex] || {}).m25 ? 'on' : ''}" onclick="toggle(${myPlayerIndex},'m25');guestTyping()">−25</button>
         <button class="q-ch" onclick="chinchon(${myPlayerIndex})">Chinchón</button>
-        <button class="q-pen ${(draft[myPlayerIndex] || {}).pen ? 'on' : ''}" onclick="penalty(${myPlayerIndex});submitGuestPts()">${(draft[myPlayerIndex] || {}).pen ? '×' + (draft[myPlayerIndex] || {}).pen : '+' + st.penalty}</button>
+        <button class="q-pen ${(draft[myPlayerIndex] || {}).pen ? 'on' : ''}" onclick="penalty(${myPlayerIndex});guestTyping()">${(draft[myPlayerIndex] || {}).pen ? '×' + (draft[myPlayerIndex] || {}).pen : '+' + st.penalty}</button>
       </div>
-      <div class="muted" style="text-align:center;margin-top:8px;font-size:.8rem"><i class="live-dot"></i>Tus puntos se envían solos a la mesa mientras escribes</div>
+      ${(() => { const my = draft[myPlayerIndex] || {}; const has = (my.pts !== undefined && my.pts !== '') || my.m10 || my.m25 || my.pen; const sent = guestLastSent !== null && guestLastSent === JSON.stringify(my);
+        return `<button class="btn block" style="margin-top:10px" onclick="submitGuestPts(true)">✅ Apuntar mis puntos</button>
+        <div class="muted" style="text-align:center;margin-top:8px;font-size:.82rem">${sent && has ? '<b style="color:var(--ok)">✓ Apuntado en la mesa.</b> Esperando a que se cierre la ronda' : (has ? '⚠️ Todavía NO se han apuntado: pulsa «Apuntar mis puntos»' : 'Escribe tus puntos y pulsa «Apuntar mis puntos»')}</div>`; })()}
       <button class="btn btn-bell block" style="margin-top:8px" onclick="triggerCloseBell()">🔔 ¡He cerrado la mano!</button>
     `}
   </div>` : '';
@@ -271,7 +273,7 @@ function viewGame() {
 
     return `<div class="player ${p.out ? 'out' : ''} ${!p.out && alive.length > 1 && p.score === minScore && G.rounds.length ? 'leader' : ''}">
       <div class="row between"><span class="name">${!p.out && p.score === minScore && G.rounds.length ? '' : ''}${esc(p.name)}</span>
-        <div class="badges">${remoteDrafts[i] ? '<span class="remote-badge">✓ Remoto</span>' : ''}${i === dealerIdx && !p.out ? '<span class="badge" style="border-color:var(--ink);color:var(--ink);font-weight:600">🂠 Reparte</span>' : ''}${p.rejoins ? `<span class="badge">↻ ${p.rejoins}</span>` : ''}${p.out ? '<span class="badge red">Eliminado</span>' : `<span class="badge">${rejLeft > 0 ? rejLeft + ' reeng.' : 'sin reeng.'}</span>`}</div></div>
+        <div class="badges">${remoteDrafts[i] ? '<span class="remote-badge">✓ Apuntado</span>' : (remoteTyping[i] && Date.now() - remoteTyping[i] < 6000 ? '<span class="remote-badge" style="background:#fff7e0;color:#8a6a10;border-color:#c9a53a">✍️ escribiendo…</span>' : '')}${i === dealerIdx && !p.out ? '<span class="badge" style="border-color:var(--ink);color:var(--ink);font-weight:600">🂠 Reparte</span>' : ''}${p.rejoins ? `<span class="badge">↻ ${p.rejoins}</span>` : ''}${p.out ? '<span class="badge red">Eliminado</span>' : `<span class="badge">${rejLeft > 0 ? rejLeft + ' reeng.' : 'sin reeng.'}</span>`}</div></div>
       <div class="row between"><div class="score" id="score-${i}">${p.score}</div><div class="muted">faltan ${Math.max(0, st.limit - p.score)}</div></div>
       <div class="bar"><i style="width:${Math.min(100, p.score / st.limit * 100)}%"></i></div>
       ${p.out ? '' : (showControls ? `
@@ -321,6 +323,17 @@ function doChinchon(i) {
   finishGame(i, 'chinchón');
 }
 function closeRound() {
+  const skip = window._skipPending; window._skipPending = false;
+  if (!skip) {
+    const waiting = S.game.players.filter((p, i) => !p.out && remoteSeen[p.name.trim().toLowerCase()] && !remoteDrafts[i]);
+    if (waiting.length) {
+      return modal(`<h2>⏳ Faltan puntos por apuntar</h2>
+        <p class="muted">Estos jugadores conectados todavía no han apuntado sus puntos:</p>
+        <p><b>${waiting.map(p => esc(p.name)).join(', ')}</b></p>
+        <div class="row"><button class="btn ghost block" onclick="closeModal()">Esperar</button>
+        <button class="btn block" onclick="closeModal();window._skipPending=true;closeRound()">Apuntar igualmente</button></div>`);
+    }
+  }
   // Trabajamos sobre una copia: si se cancela la ronda no se toca nada
   const G = JSON.parse(JSON.stringify(S.game)), st = G.settings;
   const before = JSON.parse(JSON.stringify(S.game.players));
@@ -444,14 +457,30 @@ function abandonGame() {
 function finishGame(wi, how) {
   const G = S.game; G.winner = G.players[wi].name; G.how = how; G.end = Date.now();
   sendMqtt({ type: 'sync', game: G, draft: {} });
-  S.games.unshift(G); S.game = null; draft = {}; save(); render();
+  S.games.unshift(G); S.game = null; draft = {}; remoteDrafts = {}; remoteTyping = {}; save(); render();
+  winModal(G);
+}
+function winModal(G) {
   vibrate([60, 40, 120]);
+  confetti();
+  const ranked = [...G.players].sort((a, b) => (a.out !== b.out ? (a.out ? 1 : -1) : a.score - b.score));
+  const st = G.settings || {};
+  let pot = '';
+  if (st.potPerEntry > 0) {
+    const entries = G.players.length + G.players.reduce((n, p) => n + (p.rejoins || 0), 0);
+    pot = `<p style="margin:10px 0 0">💰 Bote: <b>${(entries * st.potPerEntry).toFixed(2)} €</b> para ${esc(G.winner)}</p>`;
+  }
+  const mins = G.end && G.date ? Math.max(1, Math.round((G.end - G.date) / 60000)) : null;
+  // racha de victorias del ganador
+  let streak = 0; for (const g of S.games) { if (g.winner === G.winner && g.groupId === G.groupId) streak++; else break; }
+  const streakTxt = streak >= 2 ? `<p class="muted" style="margin:6px 0 0">🔥 ${esc(G.winner)} lleva ${streak} victorias seguidas</p>` : '';
   modal(`<div class="win"><div class="trophy">♠</div><h2 style="font-size:1.6rem">¡Gana ${esc(G.winner)}!</h2>
-    <p class="muted">Por ${how} · ${G.rounds.length} rondas</p>
-    ${G.players.map(p => `<div class="rank"><span>${esc(p.name)}${p.rejoins ? ' ↻ ' + p.rejoins : ''}</span><b>${p.score}</b></div>`).join('')}
+    <p class="muted">Por ${esc(G.how || '')} · ${G.rounds.length} rondas${mins ? ' · ' + mins + ' min' : ''}</p>
+    ${ranked.map(p => `<div class="rank"><span>${esc(p.name)}${p.rejoins ? ' ↻ ' + p.rejoins : ''}${p.out ? ' ✕' : ''}</span><b>${p.score}</b></div>`).join('')}
+    ${pot}${streakTxt}
     <button class="btn btn-wa block" style="margin-top:14px;font-size:1rem" onclick="openSendReportModal(S.games[0])">📲 Enviar resultado por WhatsApp</button>
     <div class="row" style="margin-top:8px"><button class="btn ghost block" onclick="closeModal();tab='history';render()">Historial</button>
-    <button class="btn block" onclick="closeModal();selGroup='${G.groupId}';newGame()">Revancha</button></div></div>`);
+    ${isHost ? `<button class="btn block" onclick="closeModal();selGroup='${G.groupId}';newGame()">Revancha</button>` : `<button class="btn block" onclick="closeModal()">Cerrar</button>`}</div></div>`);
 }
 function confetti() {
   const colors = ['#e6c068', '#f6eedb', '#4ccb8a', '#e5605a', '#5fb4e8'];
@@ -537,9 +566,14 @@ function handleMqttMsg(d) {
       const prevRounds = S.game ? S.game.rounds.length : -1;
       const myOld = myPlayerIndex !== null ? draft[myPlayerIndex] : undefined;
       S.game = d.game;
+      if (!isHost && d.game && d.game.winner) {
+        if (!S.games.find(g => g.id === d.game.id)) S.games.unshift(d.game);
+        S.game = null; draft = {}; guestLastSent = null; save(); render(); winModal(d.game);
+        return;
+      }
       if (d.game && d.game.rounds.length !== prevRounds) {
         // ronda nueva o deshecha: borrador limpio
-        draft = { ...(d.draft || {}) };
+        draft = { ...(d.draft || {}) }; guestLastSent = null;
       } else {
         draft = { ...draft, ...(d.draft || {}) };
         // lo que yo estoy escribiendo manda sobre lo que llegue de la mesa
@@ -565,14 +599,26 @@ function handleMqttMsg(d) {
         sendMqtt({ type: 'sync', game: S.game, draft });
       }
     }
+  } else if (d.type === 'typing') {
+    if (isHost && S.game && d.playerIndex >= 0) {
+      remoteSeen[(d.playerName || '').trim().toLowerCase()] = Date.now();
+      remoteTyping[d.playerIndex] = Date.now();
+      render();
+      setTimeout(() => { if (Date.now() - (remoteTyping[d.playerIndex] || 0) >= 6000) { delete remoteTyping[d.playerIndex]; render(); } }, 6200);
+    }
+  } else if (d.type === 'hello') {
+    if (isHost && d.name) { remoteSeen[d.name.trim().toLowerCase()] = Date.now(); }
   } else if (d.type === 'draft') {
     if (S.game && d.playerIndex >= 0 && d.playerIndex < S.game.players.length) {
       draft[d.playerIndex] = d.entry;
       remoteDrafts[d.playerIndex] = true;
+      delete remoteTyping[d.playerIndex];
       if (isHost) {
+        remoteSeen[(d.playerName || '').trim().toLowerCase()] = Date.now();
         save();
-        // sin eco de sync: los demás ven el borrador en directo sin que se les recargue la pantalla
         sendMqtt({ type: 'draftSync', draft });
+        toast(`✓ ${d.playerName} ha apuntado ${entryTotal(d.entry, S.game.settings.penalty)} pts`);
+        vibrate(20);
       }
       render();
     }
@@ -683,6 +729,7 @@ function selectRole(name, idx) {
   myPlayerIndex = idx;
   localStorage.setItem('chinchon_player_name', name);
   closeModal();
+  sendMqtt({ type: 'hello', name });
   toast(`Identificado como ${name}`);
   render();
 }
@@ -718,6 +765,7 @@ function openShareModal() {
   const shareText = `🃏 ¡Únete a nuestra mesa de Chinchón! Entra en este enlace para apuntar tus puntos: ${link}`;
   
   modal(`<h2>🔗 Invitar a la mesa en directo</h2>
+    <div style="text-align:center;margin-bottom:6px"><img alt="QR" width="140" height="140" style="border:1px solid var(--line);border-radius:6px;background:#fff;padding:4px" src="https://api.qrserver.com/v1/create-qr-code/?size=280x280&margin=4&data=${encodeURIComponent(link)}"><div class="muted" style="font-size:.78rem">Que lo escaneen con la cámara</div></div>
     <div class="share-code-box">
       <div class="muted">CÓDIGO DE SALA</div>
       <div class="share-code">${room}</div>
@@ -737,18 +785,26 @@ function openWaShare(encodedText, phone = '') {
   window.open(url, '_blank');
 }
 
-let _liveTimer = null;
+let guestLastSent = null, _typingTimer = null;
+let remoteSeen = {}, remoteTyping = {};
 function sendGuestDraftNow() {
   if (myPlayerIndex === null || !S.game) return;
   const e = draft[myPlayerIndex] || {};
+  guestLastSent = JSON.stringify(e);
   sendMqtt({ type: 'draft', playerIndex: myPlayerIndex, playerName: myPlayerName, entry: e });
 }
-// Envío en directo: cada cambio (cada número tecleado o botón) se manda casi al instante
+// Mientras escribe solo se avisa de que "está escribiendo": los puntos NO entran hasta pulsar Apuntar
+function guestTyping() {
+  if (myPlayerIndex === null || !S.game) return;
+  clearTimeout(_typingTimer);
+  _typingTimer = setTimeout(() => sendMqtt({ type: 'typing', playerIndex: myPlayerIndex, playerName: myPlayerName }), 250);
+}
 function submitGuestPts(manual) {
   if (myPlayerIndex === null || !S.game) return;
-  clearTimeout(_liveTimer);
-  if (manual === true) { sendGuestDraftNow(); toast(`✓ Puntos de ${myPlayerName} enviados a la mesa`); vibrate(25); return; }
-  _liveTimer = setTimeout(sendGuestDraftNow, 120);
+  sendGuestDraftNow();
+  toast(`✓ Puntos de ${myPlayerName} apuntados en la mesa`);
+  vibrate(25);
+  render();
 }
 
 function calculateTitles(G) {
@@ -1062,6 +1118,13 @@ function openAdminSettings(tabName) {
         </div>
       </div>
 
+      <div class="card" style="margin-bottom:12px">
+        <div class="cfg-row"><div><div class="cfg-title">Modo oscuro</div><div class="cfg-desc">Para jugar de noche sin deslumbrar</div></div>
+          <label class="switch"><input type="checkbox" ${cfg.dark ? 'checked' : ''} onchange="cfg.dark=this.checked;save();applyTheme()"><span class="slider"></span></label></div>
+      </div>
+      <label>Copia de seguridad (grupos, historial, normas, ajustes)</label>
+      <div class="row" style="margin-bottom:8px"><button class="btn ghost block" onclick="backupCopy()">📋 Copiar copia</button>
+        <button class="btn ghost block" onclick="backupRestoreForm()">♻️ Restaurar</button></div>
       <button class="btn ghost block" onclick="hardReload()">🔄 Forzar recarga limpia de mi app</button>
     `;
   }
@@ -1118,6 +1181,25 @@ function adminFinishNow() {
   finishGame(G.players.indexOf(best), 'terminada por el administrador');
 }
 
+function applyTheme() { document.body.classList.toggle('dark', !!(S.adminConfig && S.adminConfig.dark)); }
+function backupCopy() {
+  const data = JSON.stringify({ groups: S.groups, games: S.games, rulesList: S.rulesList, settings: S.settings, adminConfig: S.adminConfig });
+  (navigator.clipboard ? navigator.clipboard.writeText(data) : Promise.reject()).then(() => toast('Copia guardada en el portapapeles'), () => toast('No se pudo copiar'));
+}
+function backupRestoreForm() {
+  modal(`<h2>♻️ Restaurar copia</h2><p class="muted">Pega aquí la copia. Sustituirá tus grupos, historial y normas.</p>
+    <textarea id="bk-text" style="min-height:120px" placeholder="Pega la copia de seguridad"></textarea>
+    <div class="row" style="margin-top:12px"><button class="btn ghost block" onclick="closeModal()">Cancelar</button><button class="btn block" onclick="backupRestore()">Restaurar</button></div>`);
+}
+function backupRestore() {
+  try {
+    const d = JSON.parse($('#bk-text').value);
+    if (!Array.isArray(d.groups) || !Array.isArray(d.games)) throw 0;
+    S.groups = d.groups; S.games = d.games; if (d.rulesList) S.rulesList = d.rulesList;
+    if (d.settings) S.settings = d.settings; if (d.adminConfig) S.adminConfig = Object.assign({}, DEFAULT_ADMIN_CONFIG, d.adminConfig);
+    save(); closeModal(); applyTheme(); render(); toast('Copia restaurada');
+  } catch (e) { toast('La copia no es válida'); }
+}
 function setAdminName(val) {
   S.adminConfig.adminName = val.trim() || 'Juan';
   save();
@@ -1217,12 +1299,25 @@ function viewHistory() {
   const medals = ['1.', '2.', '3.'];
   return `<select onchange="histFilter=this.value;render()"><option value="">Todos los grupos</option>
     ${S.groups.map(g => `<option value="${g.id}" ${g.id === histFilter ? 'selected' : ''}>${esc(g.name)}</option>`).join('')}</select>
-  ${w.length ? `<h2>Ranking de victorias</h2><div class="card">${w.map(([n, c], i) => `<div class="rank"><span>${medals[i] || '·'} ${esc(n)}</span><b>${c}</b></div>`).join('')}</div>` : ''}
+  ${w.length ? `<h2>Ranking de victorias</h2><div class="card">${w.map(([n, c], i) => `<div class="rank"><span>${medals[i] || '·'} ${esc(n)}${games.length && games[0].winner === n ? ' 👑' : ''}</span><b>${c}</b></div>`).join('')}</div>` : ''}
+  ${playerStatsHtml(games)}
   <h2>Partidas (${games.length})</h2>
   ${games.length ? games.map(g => `<div class="card" onclick="showGame('${g.id}')" style="cursor:pointer">
     <div class="row between"><b>${esc(g.winner)}</b><span class="muted">${new Date(g.date).toLocaleDateString('es-ES', { day: 'numeric', month: 'short', year: 'numeric' })}</span></div>
     <div class="muted">${esc(g.groupName)} · ${g.rounds.length} rondas · ${g.how}</div>
     <div class="muted">${g.players.map(p => `${esc(p.name)} ${p.score}`).join(' · ')}</div></div>`).join('') : '<div class="empty">Todavía no habéis jugado ninguna partida</div>'}`;
+}
+function playerStatsHtml(games) {
+  if (!games.length) return '';
+  const m = {};
+  games.forEach(g => g.players.forEach((p, i) => {
+    const o = m[p.name] = m[p.name] || { n: 0, w: 0, pts: 0, hands: 0, best: null, worst: null, chin: 0 };
+    o.n++; if (g.winner === p.name) o.w++; o.chin += p.chinchones || 0;
+    g.rounds.forEach(r => { const t = r.totals && r.totals[i]; if (t !== null && t !== undefined && (!r.events || r.events[i] !== 'CHINCHÓN')) { o.pts += t; o.hands++; if (o.best === null || t < o.best) o.best = t; if (o.worst === null || t > o.worst) o.worst = t; } });
+  }));
+  const rows = Object.entries(m).sort((a, b) => b[1].w / b[1].n - a[1].w / a[1].n);
+  return `<h2>Estadísticas</h2><div class="card" style="overflow-x:auto"><table><tr><th></th><th>PJ</th><th>% vic.</th><th>Media</th><th>Mejor</th><th>Peor</th></tr>
+    ${rows.map(([n, o]) => `<tr><td style="text-align:left"><b>${esc(n)}</b>${o.chin ? ' ♠' + o.chin : ''}</td><td>${o.n}</td><td>${Math.round(o.w / o.n * 100)}%</td><td>${o.hands ? (o.pts / o.hands).toFixed(1) : '–'}</td><td>${o.best ?? '–'}</td><td>${o.worst ?? '–'}</td></tr>`).join('')}</table></div>`;
 }
 function showGame(id) {
   const g = S.games.find(x => x.id === id);
@@ -1295,6 +1390,7 @@ async function requestWakeLock() {
 render();
 checkRoomParam();
 requestWakeLock();
+applyTheme();
 $('#version').textContent = 'v' + APP_VERSION + ' ↻';
 // Botón discreto: tocar la versión fuerza una recarga limpia (borra cachés, no borra datos)
 $('#version').onclick = () => modal(`<h2>Recargar la app</h2><p class="muted">Descarga de nuevo la última versión. Tus grupos, historial y normas no se borran.</p>
