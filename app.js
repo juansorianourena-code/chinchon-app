@@ -1,5 +1,5 @@
 // ===== Chinchón – Marcador =====
-const APP_VERSION = '1.15.2';
+const APP_VERSION = '1.16.0';
 const KEY = 'chinchon-data-v1';
 const OFFICIAL_RULES = [
   ['La baraja', 'Se juega con baraja española de 40 cartas (sin ochos ni nueves). Pueden jugar de 2 a 6 jugadores.'],
@@ -522,28 +522,39 @@ function setSetting(k, d) { S.settings[k] = Math.max(0, Math.round(((S.settings[
 function promptGameMode() {
   const g = S.groups.find(x => x.id === selGroup);
   if (!g) return toast('Elige o crea un grupo primero');
-  modal(`<h2>¿Cómo vais a jugar?</h2>
-    <p class="muted">Elige cómo se apuntarán los puntos en esta partida:</p>
+  modal(`<h2>¿Cómo queréis jugar?</h2>
+    <p class="muted">Elige el tipo de partida para los jugadores de <b>${esc(g.name)}</b>:</p>
     
-    <div class="card" onclick="closeModal();startNewGame('online')" style="cursor:pointer;margin-bottom:12px;border:1.5px solid var(--ok);background:#f6fbf8">
+    <div class="card" onclick="closeModal();startNewGame('online_cards')" style="cursor:pointer;margin-bottom:12px;border:2px solid #22c55e;background:#f0fdf4">
       <div class="row between">
         <div>
-          <b style="font-size:1.05rem;color:var(--ok)">📱 Modo Móviles (Mesa conectada)</b>
+          <b style="font-size:1.05rem;color:#166534">🎴 Jugar en la App (Tapete y cartas virtuales)</b>
           <div class="muted" style="margin-top:4px;line-height:1.4">
-            Cada jugador apunta sus puntos desde su propio móvil por enlace.<br>
-            👑 <b>Tú eres el Administrador</b> y siempre ves y controlas todo.
+            ¡Cada uno juega desde su casa con cartas en pantalla! Baraja española, turnos para robar y descartar, ligar combinaciones y cierre con recuento automático.
           </div>
         </div>
-        <span style="font-size:1.5rem;color:var(--ok)">›</span>
+        <span style="font-size:1.5rem;color:#166534">›</span>
+      </div>
+    </div>
+    
+    <div class="card" onclick="closeModal();startNewGame('online')" style="cursor:pointer;margin-bottom:12px;border:1.5px solid var(--ink);background:var(--paper2)">
+      <div class="row between">
+        <div>
+          <b style="font-size:1.05rem">📱 Mesa Física (Cada uno con su móvil)</b>
+          <div class="muted" style="margin-top:4px;line-height:1.4">
+            Jugáis en persona con cartas de verdad. Cada jugador apunta sus puntos desde su propio teléfono conectado.
+          </div>
+        </div>
+        <span style="font-size:1.5rem">›</span>
       </div>
     </div>
     
     <div class="card" onclick="closeModal();startNewGame('single')" style="cursor:pointer">
       <div class="row between">
         <div>
-          <b style="font-size:1.05rem">✍️ Modo Clásico (Un solo móvil)</b>
+          <b style="font-size:1.05rem">✍️ Marcador Clásico (Un solo teléfono)</b>
           <div class="muted" style="margin-top:4px;line-height:1.4">
-            Una sola persona apunta las cartas y puntos de todos en este mismo teléfono.
+            Una sola persona anota los puntos de todos con baraja de verdad.
           </div>
         </div>
         <span style="font-size:1.5rem">›</span>
@@ -555,16 +566,29 @@ function promptGameMode() {
 
 function startNewGame(mode) {
   const g = S.groups.find(x => x.id === selGroup); if (!g) return;
-  const room = mode === 'online' ? ('CH-' + Math.random().toString(36).substring(2, 6).toUpperCase()) : null;
+  const isOnline = mode === 'online' || mode === 'online_cards';
+  const isCards = mode === 'online_cards';
+  const room = isOnline ? ('CH-' + Math.random().toString(36).substring(2, 6).toUpperCase()) : null;
+
   S.game = {
     id: uid(), adminId: S.adminId, groupId: g.id, groupName: g.name, date: Date.now(), settings: { ...S.settings },
     players: g.players.map(n => ({ name: n, score: 0, rejoins: 0, out: false, chinchones: 0 })), rounds: [], dealer: 0,
-    mode: mode, roomCode: room
+    mode: isOnline ? 'online' : 'single',
+    gameType: isCards ? 'cards' : 'scoreboard',
+    roomCode: room
   };
+
+  if (isCards && typeof initCardTable === 'function') {
+    S.game.cardTable = initCardTable(g.players);
+    window._activeCardView = 'table';
+  } else {
+    window._activeCardView = 'scoreboard';
+  }
+
   draft = {}; remoteDrafts = {}; isHost = true;
   save(); vibrate(30); render();
   
-  if (mode === 'online') {
+  if (isOnline) {
     currentRoomCode = room;
     initMqtt(room, () => {
       sendMqtt({ type: 'sync', game: S.game, draft });
@@ -574,12 +598,28 @@ function startNewGame(mode) {
       type: 'room_invite',
       roomCode: room,
       groupName: g.name,
+      gameType: isCards ? 'cards' : 'scoreboard',
       hostName: (isAdmin() ? 'Juan' : (myPlayerName || 'Administrador')),
       targets: g.players.map(p => p.trim())
     });
-    toast(`📡 Invitación automática enviada a los móviles de ${g.name}`);
+    toast(`📡 Invitación ${isCards ? 'con tapete de cartas' : ''} enviada a ${g.name}`);
     setTimeout(broadcastTableAlive, 600);
-    setTimeout(() => openShareModal(), 350);
+    if (!isCards) setTimeout(() => openShareModal(), 350);
+  }
+}
+
+function enableCardTableForCurrentGame() {
+  if (!S.game) return;
+  if (typeof initCardTable === 'function') {
+    S.game.cardTable = initCardTable(S.game.players.map(p => p.name));
+    S.game.gameType = 'cards';
+    window._activeCardView = 'table';
+    save();
+    if (S.game.mode === 'online') {
+      sendMqtt({ type: 'sync', game: S.game, draft });
+    }
+    render();
+    toast('🎴 ¡Tapete de cartas activado!');
   }
 }
 function newGame() { promptGameMode(); }
@@ -588,6 +628,13 @@ function newGame() { promptGameMode(); }
 function entryTotal(e, pen) { return (parseInt(e.pts) || 0) + (e.m10 ? -10 : 0) + (e.m25 ? -25 : 0) + (e.pen || 0) * pen; }
 function viewGame() {
   const G = S.game, st = G.settings;
+  if (!G) return '';
+
+  // Si la partida tiene tapete de cartas activo y la vista actual es 'table'
+  if ((G.gameType === 'cards' || G.cardTable) && (window._activeCardView !== 'scoreboard') && typeof renderCardTableUI === 'function') {
+    return renderCardTableUI();
+  }
+
   const alive = G.players.filter(p => !p.out);
   const minScore = Math.min(...alive.map(p => p.score));
   const dealerIdx = G.dealer ?? 0;
@@ -599,6 +646,20 @@ function viewGame() {
   syncMyPlayerIndex();
   const isGuest = !isHost && myPlayerIndex !== null;
   const isSpectator = !isHost && myPlayerIndex === null;
+
+  const cardTableSwitchBtn = (G.gameType === 'cards' || G.cardTable) ? `
+    <div style="margin-bottom:10px">
+      <button class="btn block" style="background:#1b4329;border-color:#1b4329;color:#bbf7d0;font-weight:700" onclick="window._activeCardView='table';render()">
+        🎴 Volver al Tapete de Juego
+      </button>
+    </div>
+  ` : `
+    <div style="margin-bottom:10px">
+      <button class="btn ghost block sm" style="border-color:#1b4329;color:#1b4329;font-weight:600" onclick="enableCardTableForCurrentGame()">
+        🎴 Jugar esta partida con cartas en la app (Tapete)
+      </button>
+    </div>
+  `;
 
   // Barra de cabecera según rol
   let topHeader = '';
@@ -666,7 +727,7 @@ function viewGame() {
     `}
   </div>` : '';
 
-  return `${topHeader}${specBanner}${potBanner}${guestBanner}
+  return `${topHeader}${specBanner}${potBanner}${guestBanner}${cardTableSwitchBtn}
   <div class="row between muted" style="margin-bottom:10px"><span>${esc(G.groupName)} · Ronda ${G.rounds.length + 1}</span>
     <span>Límite ${st.limit} · Reeng. ${st.maxRejoins}</span></div>
   <div class="dealer" ${isHost ? 'onclick="nextDealer()"' : ''}><span class="muted">Reparte</span> <b>${esc(dealerPlayer.name)}</b> ${isHost ? '<span class="muted">· tocar para cambiar</span>' : ''}</div>
@@ -1170,6 +1231,10 @@ function broadcastTableAlive() {
 function handleMqttMsg(d) {
   if (!d || !d.type) return;
   if (d.from && d.from === CLIENT_ID) return; // ignorar el eco de mis propios mensajes
+  if (d.type === 'card_action' || d.type.startsWith('card_')) {
+    if (window.handleCardTableMsg) window.handleCardTableMsg(d);
+    return;
+  }
   if (d.type === 'auth_broadcast') {
     localStorage.setItem('chinchon_remote_auth', JSON.stringify(d));
     checkAccessControl();
@@ -1179,13 +1244,17 @@ function handleMqttMsg(d) {
     if (isAdmin()) broadcastAuthPolicy();
     return;
   }
-  if (!d || !d.type) return;
-  if (d.from && d.from === CLIENT_ID) return; // ignorar el eco de mis propios mensajes
   if (d.type === 'sync') {
     if (!isHost || (!S.game && d.game)) {
       const prevRounds = S.game ? S.game.rounds.length : -1;
       const myOld = myPlayerIndex !== null ? draft[myPlayerIndex] : undefined;
       S.game = d.game;
+      if (d.game && d.game.cardTable) {
+        S.game.cardTable = d.game.cardTable;
+        if (d.game.gameType === 'cards' && !window._activeCardView) {
+          window._activeCardView = 'table';
+        }
+      }
       if (!isHost && d.game && d.game.winner) {
         if (!S.games.find(g => g.id === d.game.id)) S.games.unshift(d.game);
         S.game = null; draft = {}; guestLastSent = null; save(); render(); winModal(d.game);
@@ -1371,6 +1440,7 @@ function handleMqttMsg(d) {
           <div class="card" style="background:var(--paper2);margin-bottom:14px;padding:12px">
             <div style="font-size:1.15rem;font-weight:700;margin-bottom:4px">Mesa: <code>${esc(d.roomCode)}</code></div>
             <div class="muted" style="font-size:.85rem">Grupo: ${esc(d.groupName || 'Chinchón')}</div>
+            ${d.gameType === 'cards' ? '<div style="color:#166534;font-size:.85rem;margin-top:4px;font-weight:700">🎴 Partida con tapete y cartas en pantalla</div>' : ''}
           </div>
           <div class="row">
             <button class="btn ghost block" onclick="closeModal()">Luego</button>
@@ -1394,6 +1464,7 @@ function handleMqttMsg(d) {
           <p class="muted" style="margin-bottom:12px"><b>${esc(d.from)}</b> te reta a una partida cara a cara:</p>
           <div class="card" style="background:var(--paper2);margin-bottom:14px;padding:12px">
             <div style="font-size:1.15rem;font-weight:700">Mesa: <code>${esc(d.roomCode)}</code></div>
+            ${d.gameType === 'cards' ? '<div style="color:#166534;font-size:.85rem;margin-top:4px;font-weight:700">🎴 Duelo con cartas en la app (Tapete)</div>' : '<div class="muted" style="font-size:.82rem;margin-top:4px">Mesa de cartas físicas</div>'}
           </div>
           <div class="row">
             <button class="btn ghost block" onclick="closeModal()">Rechazar</button>
@@ -2725,8 +2796,40 @@ function showFriendStatsModal(name) {
 }
 
 function challengeFriend(targetName) {
+  modal(`<h2>¿Cómo quieres retar a ${esc(targetName)}?</h2>
+    <p class="muted">Elige el tipo de duelo cara a cara:</p>
+    
+    <div class="card" onclick="closeModal();startFriendDuel('${esc(targetName)}', 'cards')" style="cursor:pointer;margin-bottom:12px;border:2px solid #22c55e;background:#f0fdf4">
+      <div class="row between">
+        <div>
+          <b style="font-size:1.05rem;color:#166534">🎴 Duelo en la App (Tapete y cartas)</b>
+          <div class="muted" style="margin-top:4px;line-height:1.4">
+            Cada uno juega desde su casa con cartas en pantalla, turnos, ligar y cerrar.
+          </div>
+        </div>
+        <span style="font-size:1.5rem;color:#166534">›</span>
+      </div>
+    </div>
+    
+    <div class="card" onclick="closeModal();startFriendDuel('${esc(targetName)}', 'scoreboard')" style="cursor:pointer">
+      <div class="row between">
+        <div>
+          <b style="font-size:1.05rem">📱 Duelo en Mesa (Cartas físicas)</b>
+          <div class="muted" style="margin-top:4px;line-height:1.4">
+            Jugáis en persona con cartas de verdad y anotáis los puntos en el móvil.
+          </div>
+        </div>
+        <span style="font-size:1.5rem">›</span>
+      </div>
+    </div>
+    
+    <button class="btn ghost block" onclick="closeModal()">Cancelar</button>`);
+}
+
+function startFriendDuel(targetName, duelType = 'cards') {
   const room = 'CH-' + Math.random().toString(36).substring(2, 6).toUpperCase();
   const myName = myPlayerName || (isAdmin() ? 'Juan' : 'Amigo');
+  const isCards = duelType === 'cards';
 
   S.game = {
     id: uid(),
@@ -2742,8 +2845,17 @@ function challengeFriend(targetName) {
     rounds: [],
     dealer: 0,
     mode: 'online',
+    gameType: isCards ? 'cards' : 'scoreboard',
     roomCode: room
   };
+
+  if (isCards && typeof initCardTable === 'function') {
+    S.game.cardTable = initCardTable([myName, targetName]);
+    window._activeCardView = 'table';
+  } else {
+    window._activeCardView = 'scoreboard';
+  }
+
   draft = {};
   remoteDrafts = {};
   isHost = true;
@@ -2764,11 +2876,12 @@ function challengeFriend(targetName) {
     from: myName,
     target: targetName,
     targets: allTargets,
-    roomCode: room
+    roomCode: room,
+    gameType: isCards ? 'cards' : 'scoreboard'
   });
 
-  toast(`⚔️ Reto enviado a ${targetName}. Mesa: ${room}`);
-  setTimeout(() => openShareModal(), 350);
+  toast(`⚔️ Reto ${isCards ? 'con cartas online' : 'de mesa'} enviado a ${targetName}. Mesa: ${room}`);
+  if (!isCards) setTimeout(() => openShareModal(), 350);
 }
 
 function createGuestInviteModal() {
