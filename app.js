@@ -1,5 +1,5 @@
 // ===== Chinchón – Marcador =====
-const APP_VERSION = '1.10.0';
+const APP_VERSION = '1.11.0';
 const KEY = 'chinchon-data-v1';
 const OFFICIAL_RULES = [
   ['La baraja', 'Se juega con baraja española de 40 cartas (sin ochos ni nueves). Pueden jugar de 2 a 6 jugadores.'],
@@ -41,7 +41,9 @@ const DEFAULT_ADMIN_CONFIG = {
   wakeLock: true,
   askRejoin: true,
   tauntsEnabled: true,
-  edgeThreshold: 10
+  edgeThreshold: 10,
+  openMessageEnabled: false,
+  openMessageText: 'SOIS UNOS CABRONES'
 };
 const CLIENT_ID = 'c' + Math.random().toString(36).slice(2, 10);
 
@@ -88,11 +90,14 @@ function closeModal() {
     fn();
   }
 }
-function showOpenMessage() {
-  toast('SOIS UNOS CABRONES', 4500);
+function showOpenMessage(customText) {
+  const text = (customText !== undefined && customText !== null && String(customText).trim())
+    ? String(customText).trim()
+    : ((S && S.adminConfig && S.adminConfig.openMessageText) || 'SOIS UNOS CABRONES');
+  toast(text, 4500);
   modal(`<div style="text-align:center;padding:12px 6px">
     <div style="font-size:3rem;margin-bottom:8px">🃏</div>
-    <h2 style="font-size:1.6rem;margin:0 0 16px;text-transform:uppercase;letter-spacing:1px;color:var(--accent);border:0">SOIS UNOS CABRONES</h2>
+    <h2 style="font-size:1.6rem;margin:0 0 16px;text-transform:uppercase;letter-spacing:1px;color:var(--accent);border:0">${esc(text)}</h2>
     <button class="btn block" style="font-size:1.05rem;padding:12px" onclick="closeModal()">Entrar</button>
   </div>`);
 }
@@ -663,6 +668,10 @@ function handleMqttMsg(d) {
         }, 600);
       }
     }
+  } else if (d.type === 'alert') {
+    ringBellSound();
+    vibrate([100, 50, 100]);
+    showOpenMessage(d.text);
   } else if (d.type === 'kick') {
     if (!isHost && myPlayerName && myPlayerName.trim().toLowerCase() === d.target.trim().toLowerCase()) {
       modal(`<h2>Mesa desconectada</h2><p class="muted">Has sido desconectado de la mesa por el Administrador.</p>
@@ -1050,6 +1059,7 @@ function openAdminSettings(tabName) {
               </div>
             </div>`).join('')}
         </div>
+        <button class="btn ghost block" style="margin-bottom:8px" onclick="broadcastAlertNow()">📢 Lanzar mensaje emergente a todos los móviles</button>
         <button class="btn ghost block" style="margin-bottom:8px" onclick="remoteReloadPlayer('all')">🔄 Recargar app a TODOS los jugadores</button>
         <button class="btn ghost block" onclick="remoteResyncRoom()">⚡ Resincronizar estado completo a todos</button>
       `;
@@ -1088,6 +1098,23 @@ function openAdminSettings(tabName) {
     `;
   } else if (adminCurrentTab === 'messages') {
     body = `
+      <div class="card" style="margin-bottom:12px">
+        <div class="cfg-row">
+          <div>
+            <div class="cfg-title">Mensaje emergente al abrir la app</div>
+            <div class="cfg-desc">Muestra un cartel emergente al iniciar la aplicación</div>
+          </div>
+          <label class="switch"><input type="checkbox" ${cfg.openMessageEnabled ? 'checked' : ''} onchange="toggleOpenMessage(this.checked)"><span class="slider"></span></label>
+        </div>
+      </div>
+
+      <label>Texto del mensaje emergente / aviso</label>
+      <input id="cfg-open-msg" value="${esc(cfg.openMessageText || 'SOIS UNOS CABRONES')}" style="margin-bottom:8px" onchange="setOpenMessageText(this.value)">
+      <div class="row" style="gap:6px;margin-bottom:14px">
+        <button class="btn ghost sm" style="flex:1" onclick="showOpenMessage(document.getElementById('cfg-open-msg').value)">👁️ Probar en mi móvil</button>
+        <button class="btn sm" style="flex:1" onclick="broadcastAlertNow()">📢 Lanzar a la mesa</button>
+      </div>
+
       <label>Cabecera del mensaje de WhatsApp (Ping)</label>
       <input id="cfg-ping-header" value="${esc(cfg.customPingHeader)}" style="margin-bottom:12px" onchange="cfg.customPingHeader=this.value.trim()||DEFAULT_ADMIN_CONFIG.customPingHeader;save()">
       
@@ -1252,6 +1279,26 @@ function remoteResyncRoom() {
   toast('⚡ Estado de la mesa resincronizado con todos');
 }
 
+function toggleOpenMessage(val) {
+  S.adminConfig.openMessageEnabled = !!val;
+  save();
+  openAdminSettings('messages');
+}
+function setOpenMessageText(val) {
+  S.adminConfig.openMessageText = (val || '').trim() || 'SOIS UNOS CABRONES';
+  save();
+}
+function broadcastAlertNow() {
+  const text = (S && S.adminConfig && S.adminConfig.openMessageText) || 'SOIS UNOS CABRONES';
+  if (currentRoomCode) {
+    sendMqtt({ type: 'alert', text, from: CLIENT_ID });
+    toast(`📢 Aviso enviado a la mesa: "${text}"`);
+  } else {
+    toast(`📢 Aviso probado: "${text}"`);
+  }
+  showOpenMessage(text);
+}
+
 function remoteKickPlayer(targetName) {
   if (!S.game) return;
   sendMqtt({ type: 'kick', target: targetName });
@@ -1406,7 +1453,9 @@ render();
 checkRoomParam();
 requestWakeLock();
 applyTheme();
-showOpenMessage();
+if (S && S.adminConfig && S.adminConfig.openMessageEnabled && S.adminConfig.openMessageText) {
+  showOpenMessage(S.adminConfig.openMessageText);
+}
 $('#version').textContent = 'v' + APP_VERSION + ' ↻';
 // Botón discreto: tocar la versión fuerza una recarga limpia (borra cachés, no borra datos)
 $('#version').onclick = () => modal(`<h2>Recargar la app</h2><p class="muted">Descarga de nuevo la última versión. Tus grupos, historial y normas no se borran.</p>
