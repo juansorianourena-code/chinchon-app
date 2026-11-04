@@ -1,5 +1,5 @@
 // ===== Chinchón – Marcador =====
-const APP_VERSION = '1.13.1';
+const APP_VERSION = '1.14.0';
 const KEY = 'chinchon-data-v1';
 const OFFICIAL_RULES = [
   ['La baraja', 'Se juega con baraja española de 40 cartas (sin ochos ni nueves). Pueden jugar de 2 a 6 jugadores.'],
@@ -423,13 +423,13 @@ function showOpenMessage(customText) {
 }
 $('#modal').addEventListener('click', e => { if (e.target.id === 'modal') closeModal(); });
 
-document.querySelectorAll('.tabbar button').forEach(b => b.onclick = () => { tab = b.dataset.tab; vibrate(); render(); });
+document.querySelectorAll('.tabbar button').forEach(b => b.onclick = () => { tab = b.dataset.tab; vibrate(); render(); broadcastPresence(); });
 
 function render() {
   updateRolePill();
   if (!checkAccessControl()) return;
   document.querySelectorAll('.tabbar button').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
-  const titles = { play: S.game ? 'Partida en juego' : 'Chinchón', groups: 'Grupos', history: 'Historial', rules: 'Normas' };
+  const titles = { play: S.game ? 'Partida en juego' : 'Chinchón', groups: 'Amigos y Grupos', history: 'Historial', rules: 'Normas' };
   $('#title').textContent = titles[tab];
   const v = $('#view');
   // Conservar el foco y el cursor si alguien está escribiendo (evita que se corte la escritura)
@@ -454,11 +454,25 @@ function render() {
 let selGroup = null;
 function viewPlay() {
   const guestBanner = !isAdmin() ? `<div style="background:var(--paper2);border:1px dashed var(--accent);border-radius:6px;padding:8px 12px;margin-bottom:12px;display:flex;justify-content:space-between;align-items:center;font-size:.85rem"><span>👤 <b>Modo Invitado</b> · Propiedad de Juan</span><button class="btn sm" style="padding:5px 10px;font-size:.8rem" onclick="promptAdminPin()">👑 Volver a Admin</button></div>` : '';
+  
+  const joinByCodeCard = `
+    <div class="card" style="margin-bottom:14px;background:var(--paper2);border:1px solid var(--ink)">
+      <div style="font-weight:700;font-size:.92rem;margin-bottom:3px;display:flex;align-items:center;gap:6px">
+        <span>📱</span> <span>¿Te han invitado a una mesa?</span>
+      </div>
+      <div class="muted" style="font-size:.8rem;margin-bottom:8px">Introduce el código para entrar (ej: <code>CH-7X2A</code> o solo <code>7X2A</code>):</div>
+      <div class="row" style="gap:6px">
+        <input id="input-room-code" placeholder="Código de mesa" style="text-transform:uppercase;font-weight:700;letter-spacing:1.5px;font-family:monospace;font-size:1rem;margin:0" onkeydown="if(event.key==='Enter')joinRoomByInputCode()">
+        <button class="btn" style="white-space:nowrap;padding:8px 14px" onclick="joinRoomByInputCode()">Entrar ›</button>
+      </div>
+    </div>
+  `;
+
   const st = S.settings;
-  if (!S.groups.length) return guestBanner + `<div class="hero"><img src="icon-192.png" alt="Chinchón"><h2>¡Bienvenido!</h2>
-    <p class="muted">Primero crea un grupo con los jugadores.</p><button id="go-groups" class="btn block" onclick="tab='groups';render();openGroupForm()">Crear grupo</button></div>`;
+  if (!S.groups.length) return guestBanner + joinByCodeCard + `<div class="hero"><img src="icon-192.png" alt="Chinchón"><h2>¡Bienvenido!</h2>
+    <p class="muted">Primero crea un grupo con los jugadores o únete arriba con código.</p><button id="go-groups" class="btn block" onclick="tab='groups';render();openGroupForm()">Crear grupo</button></div>`;
   if (!selGroup || !S.groups.find(g => g.id === selGroup)) selGroup = S.groups[0].id;
-  return guestBanner + `<div class="hero" style="padding:14px"><img src="icon-192.png" alt="Chinchón"></div>
+  return guestBanner + joinByCodeCard + `<div class="hero" style="padding:14px"><img src="icon-192.png" alt="Chinchón"></div>
   <h2>¿Quién juega?</h2>
   ${S.groups.map(g => `<div class="card row between" onclick="selGroup='${g.id}';render()" style="cursor:pointer;${g.id === selGroup ? 'border-color:var(--ink)' : ''}">
      <div><b>${esc(g.name)}</b><div class="muted">${g.players.map(esc).join(' · ')}</div></div><div>${g.id === selGroup ? '<b style="color:var(--accent)">●</b>' : '<span class="muted">○</span>'}</div></div>`).join('')}
@@ -528,6 +542,15 @@ function startNewGame(mode) {
     initMqtt(room, () => {
       sendMqtt({ type: 'sync', game: S.game, draft });
     });
+    // Auto-invitación automática a los móviles del grupo
+    sendGlobalMqtt({
+      type: 'room_invite',
+      roomCode: room,
+      groupName: g.name,
+      hostName: (isAdmin() ? 'Juan' : (myPlayerName || 'Administrador')),
+      targets: g.players.map(p => p.trim())
+    });
+    toast(`📡 Invitación automática enviada a los móviles de ${g.name}`);
     setTimeout(() => openShareModal(), 350);
   }
 }
@@ -954,6 +977,65 @@ function sendMqtt(data) {
   } catch(e) {}
 }
 
+function sendGlobalMqtt(data) {
+  if (!mqttClient || !mqttClient.isConnected || !mqttClient.isConnected()) return;
+  try {
+    data.from = CLIENT_ID;
+    const m = new Paho.MQTT.Message(JSON.stringify(data));
+    m.destinationName = 'chinchon/v1/auth_global';
+    m.qos = 1;
+    mqttClient.send(m);
+  } catch(e) {}
+}
+
+function directJoinRoom(code) {
+  if (!code) return;
+  code = code.trim().toUpperCase();
+  if (!code.startsWith('CH-') && code.length === 4) code = 'CH-' + code;
+
+  if (localStorage.getItem('chinchon_role') !== 'admin') {
+    localStorage.setItem('chinchon_role', 'guest');
+  }
+  isHost = false;
+  if (S.game && S.game.roomCode && S.game.roomCode !== code) {
+    if (S.game.winner) {
+      if (!S.games) S.games = [];
+      if (!S.games.find(g => g.id === S.game.id)) S.games.unshift(S.game);
+    }
+    S.game = null;
+    draft = {};
+    remoteDrafts = {};
+    remoteTyping = {};
+    guestLastSent = null;
+    window._identityChosen = false;
+    save();
+  }
+  currentRoomCode = code;
+  initMqtt(code, () => {
+    sendMqtt({ type: 'reqSync' });
+    promptJoinIdentity(code);
+  });
+  tab = 'play';
+  render();
+  toast(`🃏 Conectando a la mesa ${code}...`);
+}
+
+function joinRoomByInputCode() {
+  const el = $('#input-room-code');
+  if (!el) return;
+  let val = (el.value || '').trim().toUpperCase();
+  if (!val) return toast('Introduce un código de mesa');
+  if (val.includes('ROOM=')) {
+    try {
+      const u = new URL(val.startsWith('http') ? val : 'https://dummy.com/' + val);
+      val = (u.searchParams.get('room') || '').toUpperCase();
+    } catch(e) {}
+  }
+  if (!val.startsWith('CH-') && val.length === 4) val = 'CH-' + val;
+  if (!val) return toast('Código no válido');
+  directJoinRoom(val);
+}
+
 function handleMqttMsg(d) {
   if (!d || !d.type) return;
   if (d.from && d.from === CLIENT_ID) return; // ignorar el eco de mis propios mensajes
@@ -1143,6 +1225,58 @@ function handleMqttMsg(d) {
     if (!isHost && myPlayerName && myPlayerName.trim().toLowerCase() === d.target.trim().toLowerCase()) {
       modal(`<h2>Mesa desconectada</h2><p class="muted">Has sido desconectado de la mesa por el Administrador.</p>
         <button class="btn block" onclick="location.replace(location.pathname)">Volver al inicio</button>`);
+    }
+  } else if (d.type === 'room_invite') {
+    const myName = (myPlayerName || (isAdmin() ? 'Juan' : '')).trim().toLowerCase();
+    const isTarget = Array.isArray(d.targets) && d.targets.some(t => t.trim().toLowerCase() === myName || t === 'all');
+    if ((isTarget || !d.targets || d.targets.length === 0) && (!S.game || S.game.roomCode !== d.roomCode)) {
+      ringBellSound();
+      vibrate([100, 50, 100, 50, 200]);
+      modal(`
+        <div style="text-align:center;padding:12px 6px">
+          <div style="font-size:3rem;margin-bottom:6px">🃏</div>
+          <h2 style="margin:0 0 4px">¡Invitación a jugar!</h2>
+          <p class="muted" style="margin-bottom:12px"><b>${esc(d.hostName || 'Juan')}</b> ha abierto una mesa de Chinchón:</p>
+          <div class="card" style="background:var(--paper2);margin-bottom:14px;padding:12px">
+            <div style="font-size:1.15rem;font-weight:700;margin-bottom:4px">Mesa: <code>${esc(d.roomCode)}</code></div>
+            <div class="muted" style="font-size:.85rem">Grupo: ${esc(d.groupName || 'Chinchón')}</div>
+          </div>
+          <div class="row">
+            <button class="btn ghost block" onclick="closeModal()">Luego</button>
+            <button class="btn block" onclick="closeModal();directJoinRoom('${esc(d.roomCode)}')">🚀 ¡Unirme ahora!</button>
+          </div>
+        </div>
+      `);
+    }
+  } else if (d.type === 'challenge') {
+    const myName = (myPlayerName || (isAdmin() ? 'Juan' : '')).trim().toLowerCase();
+    if (myName && d.target && d.target.trim().toLowerCase() === myName && (!S.game || S.game.roomCode !== d.roomCode)) {
+      ringBellSound();
+      vibrate([100, 50, 100, 50, 200]);
+      modal(`
+        <div style="text-align:center;padding:12px 6px">
+          <div style="font-size:3rem;margin-bottom:6px">⚔️</div>
+          <h2 style="margin:0 0 4px">¡Duelo de Chinchón!</h2>
+          <p class="muted" style="margin-bottom:12px"><b>${esc(d.from)}</b> te reta a una partida cara a cara:</p>
+          <div class="card" style="background:var(--paper2);margin-bottom:14px;padding:12px">
+            <div style="font-size:1.15rem;font-weight:700">Mesa: <code>${esc(d.roomCode)}</code></div>
+          </div>
+          <div class="row">
+            <button class="btn ghost block" onclick="closeModal()">Rechazar</button>
+            <button class="btn block" onclick="closeModal();directJoinRoom('${esc(d.roomCode)}')">⚔️ ¡Aceptar reto!</button>
+          </div>
+        </div>
+      `);
+    }
+  } else if (d.type === 'presence_ping') {
+    if (d.name) {
+      if (!window._onlineFriends) window._onlineFriends = {};
+      window._onlineFriends[d.name.trim().toLowerCase()] = Date.now();
+      if (tab === 'groups') {
+        const safeId = d.name.trim().toLowerCase().replace(/[^a-z0-9]/g, '_');
+        const indicator = document.getElementById('presence-' + safeId);
+        if (indicator) indicator.innerHTML = '🟢 <span style="color:var(--ok);font-size:.76rem;font-weight:600">En línea</span>';
+      }
     }
   }
 }
@@ -2136,15 +2270,307 @@ function testAsGuest() {
   render();
 }
 
-// ---------- GRUPOS ----------
+// ---------- AMIGOS Y GRUPOS ----------
+function broadcastPresence() {
+  const name = myPlayerName || (isAdmin() ? 'Juan' : null);
+  if (!name) return;
+  sendGlobalMqtt({
+    type: 'presence_ping',
+    name: name,
+    time: Date.now()
+  });
+}
+
+function getAllKnownFriends() {
+  const map = new Map();
+  const adminName = (S.adminConfig && S.adminConfig.adminName) || 'Juan';
+  map.set(adminName.toLowerCase(), { name: adminName, isAdmin: true });
+
+  if (S.adminConfig && Array.isArray(S.adminConfig.authorizedGuests)) {
+    S.adminConfig.authorizedGuests.forEach(g => {
+      if (g && g.name) {
+        const key = g.name.trim().toLowerCase();
+        if (!map.has(key)) map.set(key, { name: g.name.trim(), guestId: g.id, pass: g.pass, status: g.status });
+      }
+    });
+  }
+
+  if (Array.isArray(S.groups)) {
+    S.groups.forEach(g => {
+      if (Array.isArray(g.players)) {
+        g.players.forEach(p => {
+          const name = (p || '').trim();
+          if (name) {
+            const key = name.toLowerCase();
+            if (!map.has(key)) map.set(key, { name });
+          }
+        });
+      }
+    });
+  }
+
+  if (Array.isArray(S.games)) {
+    S.games.forEach(g => {
+      if (Array.isArray(g.players)) {
+        g.players.forEach(p => {
+          const name = (p.name || '').trim();
+          if (name) {
+            const key = name.toLowerCase();
+            if (!map.has(key)) map.set(key, { name });
+          }
+        });
+      }
+    });
+  }
+  return Array.from(map.values());
+}
+
+function getFriendStats(friendName) {
+  const fName = friendName.trim().toLowerCase();
+  const myName = (myPlayerName || (isAdmin() ? 'Juan' : '')).trim().toLowerCase();
+  let played = 0;
+  let won = 0;
+  let chinchones = 0;
+  let totalPts = 0;
+  let headToHeadPlayed = 0;
+  let myHeadWins = 0;
+  let friendHeadWins = 0;
+
+  if (Array.isArray(S.games)) {
+    S.games.forEach(g => {
+      if (!Array.isArray(g.players)) return;
+      const fPlayer = g.players.find(p => p.name.trim().toLowerCase() === fName);
+      if (fPlayer) {
+        played++;
+        totalPts += (fPlayer.score || 0);
+        chinchones += (fPlayer.chinchones || 0);
+        if (g.winner && g.winner.trim().toLowerCase() === fName) {
+          won++;
+        }
+        if (myName && myName !== fName) {
+          const myPlayer = g.players.find(p => p.name.trim().toLowerCase() === myName);
+          if (myPlayer) {
+            headToHeadPlayed++;
+            if (g.winner && g.winner.trim().toLowerCase() === myName) myHeadWins++;
+            if (g.winner && g.winner.trim().toLowerCase() === fName) friendHeadWins++;
+          }
+        }
+      }
+    });
+  }
+
+  const winRate = played > 0 ? Math.round((won / played) * 100) : 0;
+  const avgPts = played > 0 ? (totalPts / played).toFixed(1) : '–';
+
+  return {
+    played,
+    won,
+    winRate,
+    chinchones,
+    avgPts,
+    headToHeadPlayed,
+    myHeadWins,
+    friendHeadWins
+  };
+}
+
+function showFriendStatsModal(name) {
+  const st = getFriendStats(name);
+  const myName = myPlayerName || (isAdmin() ? 'Juan' : 'Tú');
+  const isMe = name.trim().toLowerCase() === myName.trim().toLowerCase();
+
+  modal(`
+    <div style="text-align:center;padding:12px 6px">
+      <div style="font-size:2.8rem;margin-bottom:4px">👤</div>
+      <h2 style="margin:0 0 2px;font-size:1.4rem;border:0">${esc(name)}</h2>
+      <div class="muted" style="font-size:.84rem;margin-bottom:14px">Estadísticas en la App de Chinchón</div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:14px;text-align:center">
+        <div class="card" style="margin:0;padding:10px">
+          <div style="font-size:1.4rem;font-weight:700;color:var(--accent)">${st.won}</div>
+          <div class="muted" style="font-size:.76rem">Victorias (${st.winRate}%)</div>
+        </div>
+        <div class="card" style="margin:0;padding:10px">
+          <div style="font-size:1.4rem;font-weight:700;color:var(--ok)">${st.chinchones}</div>
+          <div class="muted" style="font-size:.76rem">Chinchones</div>
+        </div>
+        <div class="card" style="margin:0;padding:10px">
+          <div style="font-size:1.4rem;font-weight:700">${st.played}</div>
+          <div class="muted" style="font-size:.76rem">Partidas jugadas</div>
+        </div>
+        <div class="card" style="margin:0;padding:10px">
+          <div style="font-size:1.4rem;font-weight:700">${st.avgPts}</div>
+          <div class="muted" style="font-size:.76rem">Media puntos/partida</div>
+        </div>
+      </div>
+
+      ${!isMe && st.headToHeadPlayed > 0 ? `
+        <div class="card" style="margin-bottom:14px;padding:12px;background:var(--paper2)">
+          <div style="font-weight:700;font-size:.9rem;margin-bottom:8px">⚔️ Cara a Cara (${esc(myName)} vs ${esc(name)})</div>
+          <div class="row between" style="font-size:1.05rem;font-weight:700">
+            <span>${esc(myName)}: ${st.myHeadWins} 🏆</span>
+            <span class="muted" style="font-size:.8rem">de ${st.headToHeadPlayed} partidas</span>
+            <span>${esc(name)}: ${st.friendHeadWins} 🏆</span>
+          </div>
+        </div>
+      ` : ''}
+
+      <div class="row" style="gap:6px">
+        <button class="btn ghost block" onclick="closeModal()">Cerrar</button>
+        ${!isMe ? `<button class="btn block" onclick="closeModal();challengeFriend('${esc(name)}')">⚔️ Retar a jugar</button>` : ''}
+      </div>
+    </div>
+  `);
+}
+
+function challengeFriend(targetName) {
+  const room = 'CH-' + Math.random().toString(36).substring(2, 6).toUpperCase();
+  const myName = myPlayerName || (isAdmin() ? 'Juan' : 'Amigo');
+
+  S.game = {
+    id: uid(),
+    adminId: S.adminId,
+    groupId: null,
+    groupName: `Duelo: ${myName} vs ${targetName}`,
+    date: Date.now(),
+    settings: { ...S.settings },
+    players: [
+      { name: myName, score: 0, rejoins: 0, out: false, chinchones: 0 },
+      { name: targetName, score: 0, rejoins: 0, out: false, chinchones: 0 }
+    ],
+    rounds: [],
+    dealer: 0,
+    mode: 'online',
+    roomCode: room
+  };
+  draft = {};
+  remoteDrafts = {};
+  isHost = true;
+  save();
+  render();
+
+  currentRoomCode = room;
+  initMqtt(room, () => {
+    sendMqtt({ type: 'sync', game: S.game, draft });
+  });
+
+  sendGlobalMqtt({
+    type: 'challenge',
+    from: myName,
+    target: targetName,
+    roomCode: room
+  });
+
+  toast(`⚔️ Reto enviado a ${targetName}. Mesa: ${room}`);
+  setTimeout(() => openShareModal(), 350);
+}
+
+function createGuestInviteModal() {
+  modal(`
+    <div style="padding:6px">
+      <h2>＋ Añadir amigo a la app</h2>
+      <p class="muted">Escribe el nombre de tu amigo para generar su pase oficial de acceso:</p>
+      <input id="quick-friend-name" placeholder="Nombre (ej: Miguel, Carlos...)" style="margin-bottom:12px" onkeydown="if(event.key==='Enter')confirmQuickAddFriend()">
+      <div class="row">
+        <button class="btn ghost block" onclick="closeModal()">Cancelar</button>
+        <button class="btn block" onclick="confirmQuickAddFriend()">Crear Pase</button>
+      </div>
+    </div>
+  `);
+  setTimeout(() => { const el = $('#quick-friend-name'); if (el) el.focus(); }, 150);
+}
+
+function confirmQuickAddFriend() {
+  const el = $('#quick-friend-name');
+  if (!el) return;
+  const name = (el.value || '').trim();
+  if (!name) return toast('Escribe un nombre');
+
+  if (!S.adminConfig.authorizedGuests) S.adminConfig.authorizedGuests = [];
+  const pass = 'p_' + Math.random().toString(36).substring(2, 8);
+  const newGuest = {
+    id: 'g_' + uid(),
+    name: name,
+    pass: pass,
+    status: 'allowed',
+    addedAt: Date.now()
+  };
+  S.adminConfig.authorizedGuests.unshift(newGuest);
+  save();
+  broadcastAuthPolicy();
+  closeModal();
+  render();
+  toast(`✓ Amigo ${name} añadido a la aplicación`);
+  setTimeout(() => shareGuestInvite(newGuest.id), 250);
+}
+
 function viewGroups() {
-  return `<button id="btn-new-group" class="btn block" onclick="openGroupForm()">Nuevo grupo</button><h2>Tus grupos</h2>
-  ${S.groups.length ? S.groups.map(g => {
-    const wins = winsFor(g.id);
-    return `<div class="card"><div class="row between"><b>${esc(g.name)}</b>
-      <div class="row"><button class="btn ghost sm" onclick="openGroupForm('${g.id}')">Editar</button><button class="btn danger sm" onclick="delGroup('${g.id}')">Borrar</button></div></div>
-      ${g.players.map(p => `<div class="rank"><span>${esc(p)}</span><span class="muted">${wins[p] || 0}</span></div>`).join('')}</div>`;
-  }).join('') : '<div class="empty">Aún no hay grupos</div>'}`;
+  const friends = getAllKnownFriends();
+  const myName = (myPlayerName || (isAdmin() ? 'Juan' : '')).trim().toLowerCase();
+
+  return `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+      <h2 style="margin:0">👥 Amigos de Chinchón (${friends.length})</h2>
+      ${isAdmin() ? '<button class="btn sm" onclick="createGuestInviteModal()">＋ Añadir Amigo</button>' : ''}
+    </div>
+
+    ${friends.length ? `
+      <div style="margin-bottom:20px">
+        ${friends.map(f => {
+          const isMe = f.name.trim().toLowerCase() === myName;
+          const st = getFriendStats(f.name);
+          const isOnline = window._onlineFriends && (Date.now() - (window._onlineFriends[f.name.trim().toLowerCase()] || 0) < 120000);
+          const safeId = f.name.trim().toLowerCase().replace(/[^a-z0-9]/g, '_');
+          return `
+            <div class="card" style="padding:10px 12px;margin-bottom:8px">
+              <div class="row between" style="margin-bottom:6px">
+                <div style="display:flex;align-items:center;gap:6px">
+                  <span style="font-size:1.3rem">${f.isAdmin ? '👑' : '👤'}</span>
+                  <div>
+                    <b>${esc(f.name)}</b> ${isMe ? '<span class="tag">Tú</span>' : ''}
+                    <div id="presence-${safeId}" style="font-size:.76rem;margin-top:1px">
+                      ${isOnline ? '🟢 <span style="color:var(--ok);font-weight:600">En línea</span>' : '<span class="muted">⚪ Desconectado</span>'}
+                    </div>
+                  </div>
+                </div>
+                <div class="row" style="gap:4px">
+                  <button class="btn ghost sm" style="padding:4px 8px;font-size:.78rem" onclick="showFriendStatsModal('${esc(f.name)}')">📊 Stats</button>
+                  ${!isMe ? `<button class="btn sm" style="padding:4px 9px;font-size:.78rem" onclick="challengeFriend('${esc(f.name)}')">⚔️ Retar</button>` : ''}
+                </div>
+              </div>
+              <div class="row between muted" style="font-size:.78rem;background:var(--paper2);padding:4px 8px;border-radius:4px">
+                <span>🏆 ${st.won} vic (${st.winRate}%)</span>
+                <span>🂡 ${st.chinchones} chinch.</span>
+                <span>🎮 ${st.played} part.</span>
+              </div>
+            </div>
+          `;
+        }).join('')}
+      </div>
+    ` : '<div class="empty" style="margin-bottom:16px">Aún no hay amigos registrados</div>'}
+
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+      <h2 style="margin:0">📋 Grupos de Juego</h2>
+      <button id="btn-new-group" class="btn sm" onclick="openGroupForm()">＋ Nuevo grupo</button>
+    </div>
+
+    ${S.groups.length ? S.groups.map(g => {
+      const wins = winsFor(g.id);
+      return `
+        <div class="card">
+          <div class="row between">
+            <b>${esc(g.name)}</b>
+            <div class="row" style="gap:4px">
+              <button class="btn ghost sm" onclick="openGroupForm('${g.id}')">Editar</button>
+              <button class="btn danger sm" onclick="delGroup('${g.id}')">Borrar</button>
+            </div>
+          </div>
+          <div class="muted" style="font-size:.8rem;margin:4px 0 8px">${g.players.map(esc).join(' · ')}</div>
+          ${g.players.map(p => `<div class="rank"><span>${esc(p)}</span><span class="muted">${wins[p] || 0} vic</span></div>`).join('')}
+        </div>
+      `;
+    }).join('') : '<div class="empty">Aún no hay grupos creados</div>'}
+  `;
 }
 function openGroupForm(id) {
   const g = S.groups.find(x => x.id === id) || { name: '', players: ['', '', ''] };
@@ -2297,6 +2723,8 @@ updateRolePill();
 checkAccessControl();
 requestWakeLock();
 applyTheme();
+setTimeout(broadcastPresence, 1200);
+setInterval(broadcastPresence, 45000);
 if (S && S.adminConfig && S.adminConfig.openMessageEnabled && S.adminConfig.openMessageText) {
   showOpenMessage(S.adminConfig.openMessageText);
 }
