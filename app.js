@@ -1,5 +1,5 @@
 // ===== Chinchón – Marcador =====
-const APP_VERSION = '1.12.1';
+const APP_VERSION = '1.12.2';
 const KEY = 'chinchon-data-v1';
 const OFFICIAL_RULES = [
   ['La baraja', 'Se juega con baraja española de 40 cartas (sin ochos ni nueves). Pueden jugar de 2 a 6 jugadores.'],
@@ -181,12 +181,12 @@ function checkAccessControl() {
     return false;
   }
 
-  // 3. Exigir pase de invitación
+  // 3. Exigir pase de invitación (no aplica si vienen por enlace de sala de la partida)
   const reqInvite = (remoteAuth && remoteAuth.requireInvite !== undefined)
     ? remoteAuth.requireInvite
     : (S && S.adminConfig && S.adminConfig.requireInvite !== false);
 
-  if (reqInvite && !myPass && !myName) {
+  if (!currentRoomCode && reqInvite && !myPass && (!myName || myName === 'invitado')) {
     showLockScreen({
       icon: '🔐',
       title: 'Aplicación Privada de Juan',
@@ -874,6 +874,9 @@ function handleMqttMsg(d) {
       syncMyPlayerIndex();
       save();
       render();
+      if (!isHost && currentRoomCode && (myPlayerIndex === null || !myPlayerName || myPlayerName === 'Invitado') && !window._identityChosen) {
+        promptJoinIdentity(currentRoomCode);
+      }
     }
   } else if (d.type === 'reqSync') {
     if (isHost && S.game) sendMqtt({ type: 'sync', game: S.game, draft });
@@ -996,10 +999,14 @@ function checkRoomParam() {
     r = (urlP.get('room') || hashP.get('room') || '').toUpperCase().trim();
   } catch(e) {}
   if (r) {
+    if (localStorage.getItem('chinchon_role') !== 'admin') {
+      localStorage.setItem('chinchon_role', 'guest');
+    }
     isHost = false;
     currentRoomCode = r;
     initMqtt(r, () => {
-      window._afterModal = () => promptJoinIdentity(r);
+      sendMqtt({ type: 'reqSync' });
+      promptJoinIdentity(r);
     });
   }
 }
@@ -1007,15 +1014,16 @@ function checkRoomParam() {
 function promptJoinIdentity(roomCode) {
   syncMyPlayerIndex();
   const players = S.game ? S.game.players : [];
-  modal(`<h2>🃏 Unirse a la mesa ${esc(roomCode)}</h2>
-    <p class="muted">Elige quién eres para apuntar tus propios puntos desde tu móvil:</p>
+  modal(`<h2>🃏 ¿Quién eres en la mesa?</h2>
+    <p class="muted">Elige tu nombre para apuntar tus puntos desde tu propio móvil:</p>
     ${players.length ? `<div style="margin-bottom:12px">${players.map((p, i) => `
-      <button class="btn ghost block" style="margin-bottom:6px;text-align:left;font-size:1rem" onclick="selectRole('${esc(p.name)}', ${i})">
-        👉 Soy <b>${esc(p.name)}</b>
-      </button>`).join('')}</div>` : ''}
-    <label>O introduce tu nombre si eres nuevo:</label>
+      <button class="btn ${myPlayerIndex === i ? '' : 'ghost'} block" style="margin-bottom:6px;text-align:left;font-size:1rem;display:flex;justify-content:space-between;align-items:center" onclick="selectRole('${esc(p.name)}', ${i})">
+        <span>👉 Soy <b>${esc(p.name)}</b></span>
+        <span class="muted" style="font-size:.85rem">${p.score} pts</span>
+      </button>`).join('')}</div>` : '<div class="muted" style="margin-bottom:10px">Conectando con la mesa de Juan…</div>'}
+    <label>O introduce tu nombre si no estás en la lista:</label>
     <div class="row" style="margin-top:6px">
-      <input id="join-name" placeholder="Ej: Miguel" value="${esc(myPlayerName || '')}">
+      <input id="join-name" placeholder="Tu nombre (ej: Miguel)" value="${esc(myPlayerName && myPlayerName !== 'Invitado' ? myPlayerName : '')}" onkeydown="if(event.key==='Enter')submitNewPlayer()">
       <button class="btn" onclick="submitNewPlayer()">Entrar</button>
     </div>`);
 }
@@ -1023,10 +1031,12 @@ function promptJoinIdentity(roomCode) {
 function selectRole(name, idx) {
   myPlayerName = name;
   myPlayerIndex = idx;
+  window._identityChosen = true;
   localStorage.setItem('chinchon_player_name', name);
+  localStorage.setItem('chinchon_role', 'guest');
   closeModal();
   sendMqtt({ type: 'hello', name });
-  toast(`Identificado como ${name}`);
+  toast(`✓ Identificado como ${name}`);
   render();
 }
 
@@ -1034,11 +1044,13 @@ function submitNewPlayer() {
   const name = ($('#join-name').value || '').trim();
   if (!name) return toast('Escribe tu nombre');
   myPlayerName = name;
+  window._identityChosen = true;
   localStorage.setItem('chinchon_player_name', name);
+  localStorage.setItem('chinchon_role', 'guest');
   closeModal();
   sendMqtt({ type: 'join', name });
   toast(`Entrando como ${name}…`);
-  setTimeout(() => { syncMyPlayerIndex(); render(); }, 800);
+  setTimeout(() => { syncMyPlayerIndex(); render(); }, 600);
 }
 
 function ensureRoom() {
