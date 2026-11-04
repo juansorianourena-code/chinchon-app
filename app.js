@@ -1,5 +1,5 @@
 // ===== Chinchón – Marcador =====
-const APP_VERSION = '1.13.0';
+const APP_VERSION = '1.13.1';
 const KEY = 'chinchon-data-v1';
 const OFFICIAL_RULES = [
   ['La baraja', 'Se juega con baraja española de 40 cartas (sin ochos ni nueves). Pueden jugar de 2 a 6 jugadores.'],
@@ -73,6 +73,17 @@ function load() {
       d.adminConfig = Object.assign({}, DEFAULT_ADMIN_CONFIG, d.adminConfig || {});
       if (!Array.isArray(d.adminConfig.authorizedGuests)) d.adminConfig.authorizedGuests = [];
       if (d.settings && d.settings.potPerEntry === undefined) d.settings.potPerEntry = d.adminConfig.potEnabled ? d.adminConfig.potMinBet : 0;
+      
+      // Limpieza de partidas huérfanas en dispositivos de invitados
+      const isGuestDevice = (typeof localStorage !== 'undefined' && localStorage.getItem('chinchon_role') === 'guest');
+      if (d.game && isGuestDevice) {
+        const isStale = (d.game.date && (Date.now() - d.game.date > 8 * 3600 * 1000));
+        if (d.game.winner || isStale) {
+          if (!d.games) d.games = [];
+          if (!d.games.find(g => g.id === d.game.id)) d.games.unshift(d.game);
+          d.game = null;
+        }
+      }
       return d;
     }
   } catch (e) {}
@@ -303,6 +314,20 @@ function checkAuthParams() {
 
     // Si viene por invitación para pertenecer a la aplicación (no a una sala concreta)
     if (!urlP.get('room') && !hashP.get('room') && hasAppInvite) {
+      if (!isAdmin() && S.game) {
+        if (S.game.winner) {
+          if (!S.games) S.games = [];
+          if (!S.games.find(g => g.id === S.game.id)) S.games.unshift(S.game);
+        }
+        S.game = null;
+        draft = {};
+        remoteDrafts = {};
+        remoteTyping = {};
+        currentRoomCode = null;
+        guestLastSent = null;
+        window._identityChosen = false;
+        save();
+      }
       if (gPass) localStorage.setItem('chinchon_guest_pass', gPass);
       window.history.replaceState({}, document.title, location.pathname);
       setTimeout(() => promptAppOnboarding(gName), 200);
@@ -530,10 +555,10 @@ function viewGame() {
       <span>👑 <b>Eres el Administrador</b> ${G.mode === 'online' ? '· Sala ' + esc(G.roomCode) : '· Modo clásico'}</span>
       <span>${G.mode === 'online' ? '<button class="btn ghost sm" onclick="openShareModal()">🔗 Invitar / Enlace</button>' : ''}</span>
     </div>`;
-  } else if (roomActive) {
-    topHeader = `<div class="live-bar" onclick="openShareModal()">
-      <span><i class="live-dot"></i><b>Mesa en directo: ${esc(G.roomCode)}</b></span>
-      <span style="font-size:.8rem">Info ›</span>
+  } else {
+    topHeader = `<div class="row between" style="background:var(--paper2);border:1px solid var(--ink);border-radius:6px;padding:8px 12px;margin-bottom:10px;font-size:.85rem">
+      <span>${roomActive ? `<i class="live-dot"></i> <b>Mesa ${esc(G.roomCode)}</b>` : '👤 <b>Mesa de juego</b>'}</span>
+      <button class="btn ghost sm" style="padding:4px 10px;font-size:.8rem;color:var(--accent);border-color:var(--accent)" onclick="leaveCurrentGame()">🚪 Salir al inicio</button>
     </div>`;
   }
 
@@ -627,7 +652,7 @@ function viewGame() {
       return `<td><b>${afterPts}</b> <span class="muted" style="font-size:.76rem">(${deltaStr})</span>${r.events[i] ? `<div class="tag">${esc(r.events[i])}</div>` : ''}</td>`;
     }).join('')}</tr>`).join('')}
   </table></div>` : ''}
-  ${isHost ? '<button class="btn danger block" style="margin-top:12px" onclick="abandonGame()">Abandonar partida</button>' : ''}`;
+  ${isHost ? '<button class="btn danger block" style="margin-top:14px" onclick="abandonGame()">Abandonar partida</button>' : '<button class="btn ghost block" style="margin-top:14px;color:var(--accent);border-color:var(--accent)" onclick="leaveCurrentGame()">🚪 Salir de esta partida y volver al inicio</button>'}`;
 }
 function setPts(i, v) {
   draft[i] = { ...(draft[i] || {}), pts: v };
@@ -776,8 +801,47 @@ const TAUNT_EDGE = [
   (n, f) => `${n} tiembla: solo le quedan ${f} puntos.`
 ];
 function abandonGame() {
-  modal(`<h2>¿Abandonar partida?</h2><p class="muted">No se guardará en el historial.</p>
-    <div class="row"><button class="btn ghost block" onclick="closeModal()">No</button><button class="btn danger block" onclick="S.game=null;draft={};save();closeModal();render()">Sí, abandonar</button></div>`);
+  modal(`<h2>¿Abandonar partida?</h2><p class="muted">No se guardará en el historial y se cerrará la mesa para todos los móviles conectados.</p>
+    <div class="row"><button class="btn ghost block" onclick="closeModal()">No</button><button class="btn danger block" onclick="confirmAbandonGame()">Sí, abandonar</button></div>`);
+}
+
+function confirmAbandonGame() {
+  sendMqtt({ type: 'game_abandoned' });
+  S.game = null;
+  draft = {};
+  remoteDrafts = {};
+  remoteTyping = {};
+  currentRoomCode = null;
+  save();
+  closeModal();
+  render();
+  toast('Partida abandonada y mesa cerrada');
+}
+
+function leaveCurrentGame() {
+  modal(`<h2>¿Salir de la partida?</h2><p class="muted">Volverás a la pantalla principal. Si la partida sigue activa podrás volver a entrar con el enlace de la sala.</p>
+    <div class="row">
+      <button class="btn ghost block" onclick="closeModal()">Seguir jugando</button>
+      <button class="btn danger block" onclick="confirmLeaveGame()">Sí, salir al inicio</button>
+    </div>`);
+}
+
+function confirmLeaveGame() {
+  if (S.game && S.game.winner) {
+    if (!S.games) S.games = [];
+    if (!S.games.find(g => g.id === S.game.id)) S.games.unshift(S.game);
+  }
+  S.game = null;
+  draft = {};
+  remoteDrafts = {};
+  remoteTyping = {};
+  currentRoomCode = null;
+  guestLastSent = null;
+  window._identityChosen = false;
+  save();
+  closeModal();
+  render();
+  toast('Has salido de la partida');
 }
 function finishGame(wi, how) {
   const G = S.game; G.winner = G.players[wi].name; G.how = how; G.end = Date.now();
@@ -1018,6 +1082,23 @@ function handleMqttMsg(d) {
         </div>
       `);
     }
+  } else if (d.type === 'game_abandoned') {
+    if (!isHost) {
+      if (S.game && S.game.winner) {
+        if (!S.games) S.games = [];
+        if (!S.games.find(g => g.id === S.game.id)) S.games.unshift(S.game);
+      }
+      S.game = null;
+      draft = {};
+      remoteDrafts = {};
+      remoteTyping = {};
+      currentRoomCode = null;
+      guestLastSent = null;
+      window._identityChosen = false;
+      save();
+      render();
+      toast('ℹ️ El Administrador ha cerrado la partida');
+    }
   } else if (d.type === 'history_sync') {
     if (d.game && !S.games.some(x => x.id === d.game.id)) {
       S.games.unshift(d.game);
@@ -1114,6 +1195,19 @@ function checkRoomParam() {
       localStorage.setItem('chinchon_role', 'guest');
     }
     isHost = false;
+    if (S.game && S.game.roomCode && S.game.roomCode !== r) {
+      if (S.game.winner) {
+        if (!S.games) S.games = [];
+        if (!S.games.find(g => g.id === S.game.id)) S.games.unshift(S.game);
+      }
+      S.game = null;
+      draft = {};
+      remoteDrafts = {};
+      remoteTyping = {};
+      guestLastSent = null;
+      window._identityChosen = false;
+      save();
+    }
     currentRoomCode = r;
     initMqtt(r, () => {
       sendMqtt({ type: 'reqSync' });
@@ -1649,13 +1743,15 @@ function openAdminSettings(tabName) {
         </div>
         <button class="btn ghost block" style="margin-bottom:8px" onclick="broadcastAlertNow()">📢 Lanzar mensaje emergente a todos los móviles</button>
         <button class="btn ghost block" style="margin-bottom:8px" onclick="remoteReloadPlayer('all')">🔄 Recargar app a TODOS los jugadores</button>
-        <button class="btn ghost block" onclick="remoteResyncRoom()">⚡ Resincronizar estado completo a todos</button>
+        <button class="btn ghost block" style="margin-bottom:8px" onclick="remoteResyncRoom()">⚡ Resincronizar estado completo a todos</button>
+        <button class="btn danger block" onclick="remoteCloseTableForAll()">🧹 Cerrar mesa y devolver a todos los móviles al inicio</button>
       `;
     } else {
       body = `
         <div class="card empty" style="text-align:center;padding:24px">
           <p>No hay ninguna partida activa en este momento.</p>
           <span class="muted" style="font-size:.85rem">Cuando inicies una partida con móviles, desde aquí podrás recargarle la pantalla a quien se le quede colgada, resincronizarlos o expulsarlos.</span>
+          <button class="btn ghost block" style="margin-top:14px;color:var(--accent);border-color:var(--accent)" onclick="remoteForceResetAllGuests()">🧹 Ordenar a todos los móviles salir al inicio</button>
         </div>
       `;
     }
@@ -1865,6 +1961,37 @@ function remoteResyncRoom() {
   if (!S.game) return;
   sendMqtt({ type: 'sync', game: S.game, draft });
   toast('⚡ Estado de la mesa resincronizado con todos');
+}
+
+function remoteCloseTableForAll() {
+  modal(`<h2>¿Cerrar mesa y limpiar móviles?</h2>
+    <p class="muted">Se enviará una orden a todos los teléfonos conectados para que salgan inmediatamente de la partida y regresen a la pantalla de inicio.</p>
+    <div class="row">
+      <button class="btn ghost block" onclick="closeModal()">Cancelar</button>
+      <button class="btn danger block" onclick="confirmCloseTableForAll()">Sí, cerrar mesa</button>
+    </div>`);
+}
+
+function confirmCloseTableForAll() {
+  sendMqtt({ type: 'game_abandoned' });
+  if (S.game && S.game.winner) {
+    if (!S.games) S.games = [];
+    if (!S.games.find(g => g.id === S.game.id)) S.games.unshift(S.game);
+  }
+  S.game = null;
+  draft = {};
+  remoteDrafts = {};
+  remoteTyping = {};
+  currentRoomCode = null;
+  save();
+  closeModal();
+  render();
+  toast('🧹 Mesa cerrada y orden enviada a los móviles');
+}
+
+function remoteForceResetAllGuests() {
+  sendMqtt({ type: 'game_abandoned' });
+  toast('🧹 Orden enviada: todos los móviles volverán al inicio');
 }
 
 function toggleOpenMessage(val) {
