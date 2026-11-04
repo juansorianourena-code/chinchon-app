@@ -103,12 +103,12 @@ td.tag, .tag { font-size: .68rem; color: var(--ink2); }
 .rank:last-child { border-bottom: 0; }
 
 #toast {
-  position: fixed; left: 50%; top: calc(var(--safe-t) + 66px); transform: translate(-50%, -10px); opacity: 0; z-index: 50;
+  position: fixed; left: 50%; top: calc(var(--safe-t) + 66px); transform: translate(-50%, -10px); opacity: 0; z-index: 100000;
   background: var(--ink); color: var(--paper); font-weight: 500; font-size: .9rem;
   padding: 10px 16px; border-radius: 4px; transition: .25s; pointer-events: none; text-align: center; max-width: 90vw;
 }
 #toast.show { opacity: 1; transform: translate(-50%, 0); }
-.modal { position: fixed; inset: 0; z-index: 40; background: rgba(29,27,24,.45); display: flex; align-items: center; justify-content: center; padding: 20px; }
+.modal { position: fixed; inset: 0; z-index: 99999; background: rgba(29,27,24,.45); display: flex; align-items: center; justify-content: center; padding: 20px; }
 .modal.hidden { display: none; }
 .modal .card { width: 100%; max-width: 420px; max-height: 90vh; overflow-y: auto; background: var(--paper); border-color: var(--ink); box-shadow: 5px 5px 0 var(--ink); animation: pop .2s ease; }
 .modal h2 { margin-top: 4px; }
@@ -249,7 +249,7 @@ body.dark .role-pill.admin {
   border-color: #5c382e;
 }
 .lockscreen {
-  position: fixed; inset: 0; z-index: 99999;
+  position: fixed; inset: 0; z-index: 9999;
   background: var(--paper);
   display: flex; flex-direction: column; align-items: center; justify-content: center;
   padding: 28px 20px; text-align: center;

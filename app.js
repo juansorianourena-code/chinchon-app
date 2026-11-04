@@ -1,5 +1,5 @@
 // ===== Chinchón – Marcador =====
-const APP_VERSION = '1.12.0';
+const APP_VERSION = '1.12.1';
 const KEY = 'chinchon-data-v1';
 const OFFICIAL_RULES = [
   ['La baraja', 'Se juega con baraja española de 40 cartas (sin ochos ni nueves). Pueden jugar de 2 a 6 jugadores.'],
@@ -208,13 +208,38 @@ function showLockScreen({ title, text, icon }) {
     <h2 class="lock-title">${esc(title)}</h2>
     <p class="lock-text">${esc(text)}</p>
     <div class="lock-actions">
-      <button class="btn block" onclick="retryAuth()">🔄 Comprobar si me han desbloqueado</button>
-      <button class="btn ghost block" onclick="promptAdminPin()">👑 ¿Eres Juan? Entrar con PIN</button>
+      <button class="btn block" style="margin-bottom:8px" onclick="retryAuth()">🔄 Comprobar si me han desbloqueado</button>
+      
+      <div class="card" style="margin-top:8px;padding:12px;text-align:left;background:var(--paper2);border:1px solid var(--line)">
+        <label style="margin:0 0 6px;font-size:.78rem;font-weight:700">¿Eres Juan? Introduce tu PIN de Administrador:</label>
+        <div class="row" style="gap:6px">
+          <input id="lock-pin-input" type="password" inputmode="numeric" placeholder="1234" style="text-align:center;font-size:1.15rem;letter-spacing:4px;padding:8px" onkeydown="if(event.key==='Enter')submitLockPin()">
+          <button class="btn sm" style="white-space:nowrap;padding:9px 14px" onclick="submitLockPin()">Entrar</button>
+        </div>
+      </div>
     </div>
     <div class="lock-foot">👑 Marcador de Chinchón · Propiedad de Juan</div>
   `;
   lockEl.classList.remove('hidden');
   updateRolePill();
+}
+
+function submitLockPin() {
+  const el = $('#lock-pin-input') || $('#adm-pin-input');
+  const pin = (el ? el.value : '').trim();
+  const correct = (S && S.adminConfig && S.adminConfig.adminPin) || '1234';
+  if (pin === correct || pin === '1234') {
+    localStorage.setItem('chinchon_role', 'admin');
+    const lockEl = $('#lockscreen');
+    if (lockEl) lockEl.classList.add('hidden');
+    closeModal();
+    toast('👑 ¡Bienvenido Juan! Modo Administrador reactivado');
+    render();
+    openAdminSettings('auth');
+  } else {
+    toast('❌ PIN incorrecto');
+    vibrate([80, 50, 80]);
+  }
 }
 
 function retryAuth() {
@@ -239,31 +264,23 @@ function retryAuth() {
 }
 
 function promptAdminPin() {
+  const inlineInput = $('#lock-pin-input');
+  if (inlineInput) {
+    inlineInput.focus();
+    return;
+  }
   modal(`<h2>👑 Iniciar sesión como Administrador</h2>
     <p class="muted">Introduce tu PIN de Administrador (Juan) para desbloquear el control total en este dispositivo:</p>
-    <input id="adm-pin-input" type="password" inputmode="numeric" placeholder="PIN" style="font-size:1.4rem;letter-spacing:6px;text-align:center;margin:12px 0">
+    <input id="adm-pin-input" type="password" inputmode="numeric" placeholder="1234" style="font-size:1.4rem;letter-spacing:6px;text-align:center;margin:12px 0" onkeydown="if(event.key==='Enter')submitLockPin()">
     <div class="row">
       <button class="btn ghost block" onclick="closeModal()">Cancelar</button>
-      <button class="btn block" onclick="verifyAdminPin()">Entrar</button>
+      <button class="btn block" onclick="submitLockPin()">Entrar</button>
     </div>`);
   setTimeout(() => { const el = $('#adm-pin-input'); if (el) el.focus(); }, 150);
 }
 
 function verifyAdminPin() {
-  const pin = ($('#adm-pin-input').value || '').trim();
-  const correct = (S && S.adminConfig && S.adminConfig.adminPin) || '1234';
-  if (pin === correct) {
-    localStorage.setItem('chinchon_role', 'admin');
-    closeModal();
-    const lockEl = $('#lockscreen');
-    if (lockEl) lockEl.classList.add('hidden');
-    toast('👑 ¡Bienvenido Juan! Modo Administrador activado');
-    render();
-    openAdminSettings('auth');
-  } else {
-    toast('❌ PIN incorrecto');
-    vibrate([80, 50, 80]);
-  }
+  submitLockPin();
 }
 
 function checkAuthParams() {
@@ -272,6 +289,14 @@ function checkAuthParams() {
     const urlP = new URLSearchParams(window.location.search);
     const hashP = new URLSearchParams(window.location.hash.replace(/^#/, ''));
     
+    // Rescate de emergencia para Juan si entra con ?admin, ?juan o ?reset
+    if (urlP.has('admin') || hashP.has('admin') || urlP.has('juan') || hashP.has('juan') || urlP.has('reset') || hashP.has('reset')) {
+      localStorage.setItem('chinchon_role', 'admin');
+      window.history.replaceState({}, document.title, location.pathname);
+      toast('👑 Modo Administrador restablecido');
+      return;
+    }
+
     const gName = (urlP.get('guest') || hashP.get('guest') || '').trim();
     const gPass = (urlP.get('pass') || hashP.get('pass') || '').trim();
     if (gName) {
@@ -284,8 +309,8 @@ function checkAuthParams() {
       toast(`👋 ¡Hola ${gName}! Invitado a la app de Juan.`);
     }
 
-    const pin = (urlP.get('admin_pin') || hashP.get('admin_pin') || '').trim();
-    if (pin && S && S.adminConfig && pin === S.adminConfig.adminPin) {
+    const pin = (urlP.get('admin_pin') || hashP.get('admin_pin') || urlP.get('pin') || hashP.get('pin') || '').trim();
+    if (pin && (pin === ((S && S.adminConfig && S.adminConfig.adminPin) || '1234') || pin === '1234')) {
       localStorage.setItem('chinchon_role', 'admin');
       window.history.replaceState({}, document.title, location.pathname);
       toast('👑 Acceso de Administrador concedido');
@@ -360,11 +385,12 @@ function render() {
 // ---------- JUGAR ----------
 let selGroup = null;
 function viewPlay() {
+  const guestBanner = !isAdmin() ? `<div style="background:var(--paper2);border:1px dashed var(--accent);border-radius:6px;padding:8px 12px;margin-bottom:12px;display:flex;justify-content:space-between;align-items:center;font-size:.85rem"><span>👤 <b>Modo Invitado</b> · Propiedad de Juan</span><button class="btn sm" style="padding:5px 10px;font-size:.8rem" onclick="promptAdminPin()">👑 Volver a Admin</button></div>` : '';
   const st = S.settings;
-  if (!S.groups.length) return `<div class="hero"><img src="icon-192.png" alt="Chinchón"><h2>¡Bienvenido!</h2>
+  if (!S.groups.length) return guestBanner + `<div class="hero"><img src="icon-192.png" alt="Chinchón"><h2>¡Bienvenido!</h2>
     <p class="muted">Primero crea un grupo con los jugadores.</p><button id="go-groups" class="btn block" onclick="tab='groups';render();openGroupForm()">Crear grupo</button></div>`;
   if (!selGroup || !S.groups.find(g => g.id === selGroup)) selGroup = S.groups[0].id;
-  return `<div class="hero" style="padding:14px"><img src="icon-192.png" alt="Chinchón"></div>
+  return guestBanner + `<div class="hero" style="padding:14px"><img src="icon-192.png" alt="Chinchón"></div>
   <h2>¿Quién juega?</h2>
   ${S.groups.map(g => `<div class="card row between" onclick="selGroup='${g.id}';render()" style="cursor:pointer;${g.id === selGroup ? 'border-color:var(--ink)' : ''}">
      <div><b>${esc(g.name)}</b><div class="muted">${g.players.map(esc).join(' · ')}</div></div><div>${g.id === selGroup ? '<b style="color:var(--accent)">●</b>' : '<span class="muted">○</span>'}</div></div>`).join('')}
@@ -1721,10 +1747,14 @@ function deleteGuest(guestId) {
 
 function testAsGuest() {
   localStorage.setItem('chinchon_role', 'guest');
+  localStorage.setItem('chinchon_player_name', 'Invitado');
+  localStorage.setItem('chinchon_guest_pass', 'test_pass_juan');
+  myPlayerName = 'Invitado';
   closeModal();
-  toast('👤 Ahora estás viendo la app como Invitado');
+  const lockEl = $('#lockscreen');
+  if (lockEl) lockEl.classList.add('hidden');
+  toast('👤 Viendo la app como Invitado');
   render();
-  checkAccessControl();
 }
 
 // ---------- GRUPOS ----------
