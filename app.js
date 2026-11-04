@@ -1,5 +1,5 @@
 // ===== Chinchón – Marcador =====
-const APP_VERSION = '1.12.2';
+const APP_VERSION = '1.13.0';
 const KEY = 'chinchon-data-v1';
 const OFFICIAL_RULES = [
   ['La baraja', 'Se juega con baraja española de 40 cartas (sin ochos ni nueves). Pueden jugar de 2 a 6 jugadores.'],
@@ -299,6 +299,16 @@ function checkAuthParams() {
 
     const gName = (urlP.get('guest') || hashP.get('guest') || '').trim();
     const gPass = (urlP.get('pass') || hashP.get('pass') || '').trim();
+    const hasAppInvite = urlP.has('invite') || hashP.has('invite') || urlP.has('inv') || hashP.has('inv') || urlP.has('guest') || hashP.has('guest');
+
+    // Si viene por invitación para pertenecer a la aplicación (no a una sala concreta)
+    if (!urlP.get('room') && !hashP.get('room') && hasAppInvite) {
+      if (gPass) localStorage.setItem('chinchon_guest_pass', gPass);
+      window.history.replaceState({}, document.title, location.pathname);
+      setTimeout(() => promptAppOnboarding(gName), 200);
+      return;
+    }
+
     if (gName) {
       localStorage.setItem('chinchon_role', 'guest');
       localStorage.setItem('chinchon_player_name', gName);
@@ -316,6 +326,39 @@ function checkAuthParams() {
       toast('👑 Acceso de Administrador concedido');
     }
   } catch(e) {}
+}
+
+function promptAppOnboarding(suggestedName) {
+  modal(`
+    <div style="text-align:center;padding:12px 6px">
+      <div style="font-size:3rem;margin-bottom:8px">🃏</div>
+      <h2 style="margin:0 0 6px">¡Bienvenido a la App de Juan!</h2>
+      <p class="muted" style="line-height:1.5;margin-bottom:16px">
+        Has recibido una invitación para unirte como <b>Invitado Autorizado</b> al Marcador de Chinchón de Juan.
+      </p>
+      <label style="text-align:left;margin-bottom:6px">¿Cuál es tu nombre?</label>
+      <input id="onboard-name" placeholder="Escribe tu nombre (ej: Miguel)" value="${esc(suggestedName || (myPlayerName && myPlayerName !== 'Invitado' ? myPlayerName : ''))}" style="font-size:1.15rem;padding:10px;text-align:center;margin-bottom:14px" onkeydown="if(event.key==='Enter')confirmAppOnboarding()">
+      <button class="btn block" style="font-size:1rem;padding:13px" onclick="confirmAppOnboarding()">✅ Activar mi cuenta de Invitado</button>
+      <div style="margin-top:16px;font-size:.78rem;color:var(--ink2)">👑 Aplicación privada administrada por Juan</div>
+    </div>
+  `);
+  setTimeout(() => { const el = $('#onboard-name'); if (el) el.focus(); }, 150);
+}
+
+function confirmAppOnboarding() {
+  const input = $('#onboard-name');
+  const name = (input ? input.value : '').trim();
+  if (!name) return toast('Por favor, escribe tu nombre');
+  myPlayerName = name;
+  const pass = localStorage.getItem('chinchon_guest_pass') || ('p_' + uid());
+  localStorage.setItem('chinchon_role', 'guest');
+  localStorage.setItem('chinchon_player_name', name);
+  localStorage.setItem('chinchon_guest_pass', pass);
+  closeModal();
+  sendMqtt({ type: 'guest_register', name, pass });
+  toast(`✓ ¡Bienvenido ${name}! Cuenta activada`);
+  render();
+  checkAccessControl();
 }
 
 function broadcastAuthPolicy() {
@@ -574,8 +617,15 @@ function viewGame() {
     <div class="card" style="text-align:center;padding:12px;background:var(--paper2);margin-top:14px">
       <span class="muted">👑 Esperando a que el Administrador cierre la ronda</span>
     </div>`}
-  ${G.rounds.length ? `<h2>Rondas</h2><div class="card"><table><tr><th>#</th>${G.players.map(p => `<th>${esc(p.name)}</th>`).join('')}</tr>
-    ${G.rounds.map((r, n) => `<tr><td class="tag">${n + 1}</td>${r.totals.map((t, i) => `<td>${t === null ? '–' : (t > 0 ? '+' + t : t)}${r.events[i] ? `<div class="tag">${r.events[i]}</div>` : ''}</td>`).join('')}</tr>`).join('')}
+  ${G.rounds.length ? `<h2>Rondas</h2><div class="card" style="overflow-x:auto"><table><tr><th>#</th>${G.players.map(p => `<th>${esc(p.name)}</th>`).join('')}</tr>
+    ${G.rounds.map((r, n) => `<tr><td class="tag">${n + 1}</td>${r.totals.map((t, i) => {
+      if (t === null) return `<td><span class="muted">–</span>${r.events[i] ? `<div class="tag">${esc(r.events[i])}</div>` : ''}</td>`;
+      const beforePts = (r.before && r.before[i]) ? r.before[i].score : 0;
+      const nextR = G.rounds[n + 1];
+      const afterPts = (nextR && nextR.before && nextR.before[i]) ? nextR.before[i].score : (beforePts + t);
+      const deltaStr = t > 0 ? '+' + t : '' + t;
+      return `<td><b>${afterPts}</b> <span class="muted" style="font-size:.76rem">(${deltaStr})</span>${r.events[i] ? `<div class="tag">${esc(r.events[i])}</div>` : ''}</td>`;
+    }).join('')}</tr>`).join('')}
   </table></div>` : ''}
   ${isHost ? '<button class="btn danger block" style="margin-top:12px" onclick="abandonGame()">Abandonar partida</button>' : ''}`;
 }
@@ -732,6 +782,7 @@ function abandonGame() {
 function finishGame(wi, how) {
   const G = S.game; G.winner = G.players[wi].name; G.how = how; G.end = Date.now();
   sendMqtt({ type: 'sync', game: G, draft: {} });
+  sendMqtt({ type: 'history_sync', game: G });
   S.games.unshift(G); S.game = null; draft = {}; remoteDrafts = {}; remoteTyping = {}; save(); render();
   winModal(G);
 }
@@ -947,6 +998,66 @@ function handleMqttMsg(d) {
     ringBellSound();
     vibrate([100, 50, 100]);
     showOpenMessage(d.text);
+  } else if (d.type === 'game_ping') {
+    const myName = (myPlayerName || '').trim().toLowerCase();
+    const isTarget = Array.isArray(d.targets) && d.targets.some(t => t.trim().toLowerCase() === myName || t === 'all');
+    if (isTarget || !d.targets) {
+      ringBellSound();
+      vibrate([100, 50, 100, 50, 200]);
+      if (d.game && !S.games.some(x => x.id === d.game.id)) {
+        S.games.unshift(d.game);
+        save();
+      }
+      modal(`
+        <div style="text-align:center;padding:12px 6px">
+          <div style="font-size:3rem;margin-bottom:6px">🔔</div>
+          <h2 style="margin:0 0 4px">¡Fin de Partida!</h2>
+          <p class="muted" style="margin-bottom:12px">${esc(d.sender || 'Juan')} ha enviado el acta oficial a tu móvil:</p>
+          <div class="card" style="text-align:left;font-family:var(--sans);font-size:.86rem;white-space:pre-wrap;background:var(--paper2);max-height:45vh;overflow-y:auto;margin-bottom:14px">${esc(d.report)}</div>
+          <button class="btn block" onclick="closeModal();tab='history';render()">Ver en mi historial</button>
+        </div>
+      `);
+    }
+  } else if (d.type === 'history_sync') {
+    if (d.game && !S.games.some(x => x.id === d.game.id)) {
+      S.games.unshift(d.game);
+      save();
+      if (tab === 'history') render();
+      toast('📜 Partida guardada en tu historial');
+    }
+  } else if (d.type === 'full_history_sync') {
+    if (Array.isArray(d.games)) {
+      let added = 0;
+      d.games.forEach(g => {
+        if (!S.games.some(x => x.id === g.id)) {
+          S.games.push(g);
+          added++;
+        }
+      });
+      if (added > 0) {
+        S.games.sort((a, b) => b.date - a.date);
+        save();
+        if (tab === 'history') render();
+        toast(`📜 ${added} ${added === 1 ? 'partida sincronizada' : 'partidas sincronizadas'}`);
+      }
+    }
+  } else if (d.type === 'guest_register') {
+    if (isAdmin() && d.name) {
+      if (!S.adminConfig.authorizedGuests) S.adminConfig.authorizedGuests = [];
+      let g = S.adminConfig.authorizedGuests.find(x => x.name.trim().toLowerCase() === d.name.trim().toLowerCase());
+      if (!g) {
+        S.adminConfig.authorizedGuests.unshift({
+          id: 'g_' + uid(),
+          name: d.name.trim(),
+          pass: d.pass || ('p_' + uid()),
+          status: 'allowed',
+          addedAt: Date.now()
+        });
+        save();
+        broadcastAuthPolicy();
+      }
+      toast(`👤 ¡${d.name} se ha unido a tu aplicación!`);
+    }
   } else if (d.type === 'kick') {
     if (!isHost && myPlayerName && myPlayerName.trim().toLowerCase() === d.target.trim().toLowerCase()) {
       modal(`<h2>Mesa desconectada</h2><p class="muted">Has sido desconectado de la mesa por el Administrador.</p>
@@ -1117,9 +1228,10 @@ function submitGuestPts(manual) {
 
 function calculateTitles(G) {
   const titles = [];
-  if (!G || !G.players || !G.rounds) return titles;
-  
-  // 1. El Francotirador: más cierres con −10 o −25
+  if (!G || !G.players || !G.rounds || G.rounds.length < 2) return titles;
+  const pick = a => a[Math.floor(Math.random() * a.length)];
+
+  // 1. Cierres perfectos / Francotirador
   let maxMinus = 0, sniper = null;
   G.players.forEach((p, i) => {
     let count = 0;
@@ -1129,16 +1241,40 @@ function calculateTitles(G) {
     });
     if (count > maxMinus) { maxMinus = count; sniper = p.name; }
   });
-  if (sniper && maxMinus > 0) titles.push(`👑 *El Francotirador:* ${sniper} (${maxMinus} ${maxMinus === 1 ? 'cierre perfecto' : 'cierres perfectos'})`);
+  if (sniper && maxMinus > 0) {
+    const sniperPhrases = [
+      `👑 *El Francotirador:* ${sniper} (${maxMinus} ${maxMinus === 1 ? 'cierre perfecto' : 'cierres perfectos'}. Apunta a la cabeza y no perdona.)`,
+      `🎯 *El Cirujano:* ${sniper} (${maxMinus} ${maxMinus === 1 ? 'cierre limpio' : 'cierres limpios'}. Precisión milimétrica para dejar a todos temblando.)`,
+      `🥷 *El Asesino Silencioso:* ${sniper} (${maxMinus} cierres de −10/−25. No avisa, cierra y a cobrar.)`
+    ];
+    titles.push(pick(sniperPhrases));
+  }
 
-  // 2. El Inmortal: quien se reenganchó y aguantó más
+  // 2. Chinchón directo
+  const chinchonero = G.players.find(p => p.chinchones > 0);
+  if (chinchonero) {
+    const chinPhrases = [
+      `♠️ *El Dios de la Baraja:* ${chinchonero.name} (¡CHINCHÓN directo! Pónganse de pie y aplaudan.)`,
+      `🪄 *El Mago Supremo:* ${chinchonero.name} (sacó el Chinchón de la chistera y reventó la partida.)`
+    ];
+    titles.push(pick(chinPhrases));
+  }
+
+  // 3. Reenganches / Inmortal
   const rejoining = G.players.filter(p => p.rejoins > 0);
   if (rejoining.length) {
     const best = [...rejoining].sort((a, b) => (a.out === b.out ? a.score - b.score : (a.out ? 1 : -1)))[0];
-    if (best) titles.push(`🧟 *El Inmortal:* ${best.name} (${best.rejoins} ${best.rejoins === 1 ? 'reenganche' : 'reenganches'})`);
+    if (best) {
+      const immortalPhrases = [
+        `🧟 *El Inmortal:* ${best.name} (${best.rejoins} ${best.rejoins === 1 ? 'reenganche' : 'reenganches'}. Gasta más vidas que un gato en un tejado.)`,
+        `🦅 *El Ave Fénix:* ${best.name} (resucitó de entre los muertos para seguir dando guerra.)`,
+        `💸 *El Mecenas del Bote:* ${best.name} (a base de reenganches casi paga la cena de todos.)`
+      ];
+      titles.push(pick(immortalPhrases));
+    }
   }
 
-  // 3. El Barista: el primero eliminado o con peor puntuación
+  // 4. Barista / Primer eliminado o peor puesto
   const firstElimRound = G.rounds.findIndex(r => r.totals && r.totals.some((t, i) => G.players[i].out && r.before && r.before[i] && !r.before[i].out));
   let barista = null;
   if (firstElimRound >= 0) {
@@ -1147,11 +1283,18 @@ function calculateTitles(G) {
   }
   if (!barista) {
     const worst = [...G.players].sort((a, b) => b.score - a.score)[0];
-    if (worst) barista = worst.name;
+    if (worst && worst.name !== G.winner) barista = worst.name;
   }
-  if (barista) titles.push(`☕ *El Barista:* ${barista} (primer eliminado, encargado oficial del café)`);
+  if (barista) {
+    const baristaPhrases = [
+      `☕ *El Barista Oficial:* ${barista} (primer eliminado; ya puede ir poniendo la cafetera a calentar.)`,
+      `🛵 *El Repartidor de Churros:* ${barista} (le ha durado la partida lo que un suspiro. Le toca invitar.)`,
+      `🪑 *El Espectador VIP:* ${barista} (palco de honor para ver cómo juegan los mayores.)`
+    ];
+    titles.push(pick(baristaPhrases));
+  }
 
-  // 4. El Pupas: la peor mano individual
+  // 5. El Pupas / Peor mano individual
   let maxHand = 0, pupas = null;
   G.rounds.forEach(r => {
     if (r.totals) {
@@ -1160,7 +1303,46 @@ function calculateTitles(G) {
       });
     }
   });
-  if (pupas && maxHand >= 15) titles.push(`💥 *El Pupas:* ${pupas} (+${maxHand} pts de un golpe)`);
+  if (pupas && maxHand >= 15 && pupas !== barista) {
+    const pupasPhrases = [
+      `💥 *El Pupas:* ${pupas} (se comió una mano de +${maxHand} pts con patatas. Ánimo, de todo se sale.)`,
+      `🧲 *El Imán de Oros:* ${pupas} (robó todo lo que no ligaba y se tragó ${maxHand} de una sentada.)`,
+      `📉 *La Ruina:* ${pupas} (+${maxHand} puntos en una sola mano. Ni queriendo sale tan mal.)`
+    ];
+    titles.push(pick(pupasPhrases));
+  }
+
+  // 6. El Funambulista / Al límite
+  const limit = (G.settings && G.settings.limit) || 100;
+  let wirePlayer = null, wireMinGap = 999;
+  G.players.forEach(p => {
+    if (!p.out && (limit - p.score) <= 10 && (limit - p.score) >= 0) {
+      if ((limit - p.score) < wireMinGap) {
+        wireMinGap = limit - p.score;
+        wirePlayer = p.name;
+      }
+    }
+  });
+  if (wirePlayer && wirePlayer !== sniper && wirePlayer !== barista) {
+    const wirePhrases = [
+      `🎪 *El Funambulista:* ${wirePlayer} (aguantó a solo ${wireMinGap} pts del límite. Nervios de acero.)`,
+      `🥶 *El Desfibrilador:* ${wirePlayer} (jugó con el corazón en la boca a ${wireMinGap} de la calle.)`
+    ];
+    titles.push(pick(wirePhrases));
+  }
+
+  // 7. La Tortuga Sabia
+  if (G.players.length >= 3) {
+    const alivePlayers = G.players.filter(p => !p.out);
+    if (alivePlayers.length && alivePlayers[0].name !== sniper) {
+      const p = alivePlayers[0];
+      const tortugaPhrases = [
+        `🐢 *La Tortuga Sabia:* ${p.name} (a paso lento pero seguro, sin hacer ruido hasta el podio.)`,
+        `🕊️ *El Pacifista:* ${p.name} (jugó tranquilo mientras los demás se mataban entre ellos.)`
+      ];
+      titles.push(pick(tortugaPhrases));
+    }
+  }
 
   return titles;
 }
@@ -1196,7 +1378,7 @@ function buildGamePingReport(G) {
       const p3 = (potTotal * 0.10).toFixed(2);
       potLine = `💰 *Bote de la partida (${potTotal} € · ${entries} entradas):*\n` +
                 `  🥇 1º (${winner.name}): *${p1} €*\n` +
-                `  🥈 2º (${ranked[1].name}): *${p2} €*\n` +
+                `  🥈 2º (${ranked[1].name}): *${p2} €*\n\n` +
                 `  🥉 3º (${ranked[2].name}): *${p3} €*\n\n`;
     } else {
       potLine = `💰 *Bote de la partida:* *${potTotal} €* para ${winner.name} (${entries} entradas a ${st.potPerEntry}€)\n\n`;
@@ -1227,12 +1409,27 @@ function openSendReportModal(game) {
   const encoded = encodeURIComponent(reportText);
 
   modal(`<h2>📲 Enviar resultado de la partida</h2>
-    <p class="muted">Elige a quién quieres mandarle el ping con el resultado:</p>
+    <p class="muted">Elige cómo quieres compartir el resultado y a quién mandárselo:</p>
+    
+    <label style="margin:12px 0 6px">🔔 Enviar aviso directo a móviles (App Ping):</label>
+    <div class="card" style="margin-bottom:14px;padding:10px 12px;background:var(--paper2)">
+      <div style="font-size:.82rem;margin-bottom:8px" class="muted">Selecciona los móviles para hacer sonar la app con el acta oficial:</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:10px">
+        ${G.players.map((p, i) => `
+          <label style="display:flex;align-items:center;gap:6px;font-size:.86rem;text-transform:none;margin:0;cursor:pointer">
+            <input type="checkbox" class="ping-target" value="${esc(p.name)}" checked style="width:auto">
+            <span><b>${esc(p.name)}</b> <span class="muted">(${p.score})</span></span>
+          </label>`).join('')}
+      </div>
+      <button class="btn block sm" onclick="sendInAppPingToTargets('${G.id}')">📢 Enviar Ping y guardar en sus móviles</button>
+    </div>
+
+    <label>Compartir por WhatsApp:</label>
     <div style="margin-bottom:12px">
-      <button class="btn btn-wa block" style="margin-bottom:10px;font-size:1rem" onclick="openWaShare('${encoded}')">
+      <button class="btn btn-wa block" style="margin-bottom:8px;font-size:1rem" onclick="openWaShare('${encoded}')">
         👥 <b>Compartir con el grupo de WhatsApp</b>
       </button>
-      <div class="muted" style="margin:10px 0 6px">O enviar mensaje privado a:</div>
+      <div class="muted" style="margin:8px 0 6px">O enviar mensaje privado a:</div>
       ${G.players.map(p => `
         <button class="btn ghost block" style="margin-bottom:6px;display:flex;justify-content:space-between;align-items:center" onclick="openWaShare('${encoded}')">
           <span>👤 <b>${esc(p.name)}</b> <span class="muted">(${p.score} pts)</span></span>
@@ -1246,6 +1443,35 @@ function openSendReportModal(game) {
     <div style="margin-top:10px">
       <button class="btn block" onclick="closeModal()">Cerrar</button>
     </div>`);
+}
+
+function sendInAppPingToTargets(gameId) {
+  const G = (S.games && S.games.find(x => x.id === gameId)) || S.game;
+  if (!G) return toast('Partida no disponible');
+  const targets = Array.from(document.querySelectorAll('.ping-target:checked')).map(el => el.value);
+  if (!targets.length) return toast('Selecciona al menos un jugador');
+  const report = buildGamePingReport(G);
+  sendMqtt({
+    type: 'game_ping',
+    targets,
+    game: G,
+    report,
+    sender: (S.adminConfig && S.adminConfig.adminName) || 'Juan'
+  });
+  toast(`🔔 Ping enviado a: ${targets.join(', ')}`);
+}
+
+function syncAllHistoryToMobiles() {
+  if (!S.games || !S.games.length) return toast('No hay partidas en el historial');
+  sendMqtt({ type: 'full_history_sync', games: S.games });
+  toast('⚡ Historial completo enviado a los móviles');
+}
+
+function syncSingleGameToMobiles(id) {
+  const g = S.games && S.games.find(x => x.id === id);
+  if (!g) return toast('Partida no encontrada');
+  sendMqtt({ type: 'history_sync', game: g });
+  toast('⚡ Partida enviada a los móviles');
 }
 
 // ===== PANEL DE CONFIGURACIÓN DE JUAN (ADMINISTRADOR) =====
@@ -1314,12 +1540,13 @@ function openAdminSettings(tabName) {
         </div>
       </div>
 
-      <label>Crear invitación para un amigo</label>
+      <label>Crear invitación a la aplicación</label>
       <div class="card" style="margin-bottom:12px">
-        <div class="row" style="gap:6px">
+        <div class="row" style="gap:6px;margin-bottom:8px">
           <input id="new-guest-name" placeholder="Nombre (ej: Miguel, Carlos...)" style="margin:0">
           <button class="btn sm" style="white-space:nowrap" onclick="createGuestInvite()">＋ Crear Pase</button>
         </div>
+        <button class="btn ghost block sm" onclick="copyGeneralInviteLink()">🔗 Enlace general de invitación a la App</button>
       </div>
 
       <label>Amigos e Invitados (${guests.length})</label>
@@ -1697,6 +1924,19 @@ function setAdminPin(val) {
   toast('PIN de Administrador actualizado: ' + p);
 }
 
+function copyGeneralInviteLink() {
+  const url = `${location.origin}${location.pathname}?invite=juan`;
+  const wa = `🃏 ¡Hola! Te invito a tener el Marcador de Chinchón de Juan en tu móvil. Entra aquí para activar tu cuenta:\n${url}`;
+  modal(`<h2>🔗 Enlace de Invitación a la App</h2>
+    <p class="muted">Tus amigos abrirán este enlace, pondrán su nombre y activarán su cuenta de invitado en tu aplicación:</p>
+    <input readonly value="${esc(url)}" style="margin-bottom:12px;font-size:.84rem" onclick="this.select()">
+    <div class="row" style="margin-bottom:8px">
+      <button class="btn block" onclick="copyInviteText('${esc(url)}')">📋 Copiar enlace</button>
+      <a class="btn block" style="text-align:center;text-decoration:none;background:#25D366;color:#fff;border-color:#25D366" href="https://api.whatsapp.com/send?text=${encodeURIComponent(wa)}" target="_blank">💬 WhatsApp</a>
+    </div>
+    <button class="btn ghost block" onclick="openAdminSettings('auth')">Volver</button>`);
+}
+
 function createGuestInvite() {
   const input = $('#new-guest-name');
   const name = (input.value || '').trim();
@@ -1722,7 +1962,7 @@ function shareGuestInvite(guestId) {
   const url = `${location.origin}${location.pathname}?guest=${encodeURIComponent(g.name)}&pass=${encodeURIComponent(g.pass)}`;
   const waMsg = `🃏 ¡Hola ${g.name}! Aquí tienes tu acceso exclusivo como invitado al Marcador de Chinchón de Juan:\n${url}`;
   modal(`<h2>📲 Enlace de ${esc(g.name)}</h2>
-    <p class="muted">Tu amigo abrirá este enlace y entrará como invitado autorizado bajo tu administración:</p>
+    <p class="muted">Tu amigo abrirá este enlace, confirmará su nombre y activará su cuenta en tu aplicación:</p>
     <input readonly value="${esc(url)}" style="margin-bottom:12px;font-size:.82rem" onclick="this.select()">
     <div class="row" style="margin-bottom:8px">
       <button class="btn block" onclick="copyInviteText('${esc(url)}')">📋 Copiar enlace</button>
@@ -1818,7 +2058,10 @@ function viewHistory() {
     ${S.groups.map(g => `<option value="${g.id}" ${g.id === histFilter ? 'selected' : ''}>${esc(g.name)}</option>`).join('')}</select>
   ${w.length ? `<h2>Ranking de victorias</h2><div class="card">${w.map(([n, c], i) => `<div class="rank"><span>${medals[i] || '·'} ${esc(n)}${games.length && games[0].winner === n ? ' 👑' : ''}</span><b>${c}</b></div>`).join('')}</div>` : ''}
   ${playerStatsHtml(games)}
-  <h2>Partidas (${games.length})</h2>
+  <div class="row between" style="margin-top:18px;margin-bottom:8px">
+    <h2 style="margin:0;border:0">Partidas (${games.length})</h2>
+    ${games.length ? `<button class="btn ghost sm" onclick="syncAllHistoryToMobiles()">⚡ Sincronizar con móviles</button>` : ''}
+  </div>
   ${games.length ? games.map(g => `<div class="card" onclick="showGame('${g.id}')" style="cursor:pointer">
     <div class="row between"><b>${esc(g.winner)}</b><span class="muted">${new Date(g.date).toLocaleDateString('es-ES', { day: 'numeric', month: 'short', year: 'numeric' })}</span></div>
     <div class="muted">${esc(g.groupName)} · ${g.rounds.length} rondas · ${g.how}</div>
@@ -1838,12 +2081,23 @@ function playerStatsHtml(games) {
 }
 function showGame(id) {
   const g = S.games.find(x => x.id === id);
+  if (!g) return;
   modal(`<h2>${esc(g.groupName)} – ${new Date(g.date).toLocaleString('es-ES', { dateStyle: 'medium', timeStyle: 'short' })}</h2>
     <p><b>${esc(g.winner)}</b> <span class="muted">(${g.how})</span></p>
     <div style="max-height:45vh;overflow:auto"><table><tr><th>#</th>${g.players.map(p => `<th>${esc(p.name)}</th>`).join('')}</tr>
-    ${g.rounds.map((r, n) => `<tr><td class="tag">${n + 1}</td>${r.totals.map((t, i) => `<td>${t === null ? '–' : t}${r.events[i] ? `<div class="tag">${r.events[i]}</div>` : ''}</td>`).join('')}</tr>`).join('')}
+    ${g.rounds.map((r, n) => `<tr><td class="tag">${n + 1}</td>${r.totals.map((t, i) => {
+      if (t === null) return `<td><span class="muted">–</span>${r.events[i] ? `<div class="tag">${esc(r.events[i])}</div>` : ''}</td>`;
+      const beforePts = (r.before && r.before[i]) ? r.before[i].score : 0;
+      const nextR = g.rounds[n + 1];
+      const afterPts = (nextR && nextR.before && nextR.before[i]) ? nextR.before[i].score : (beforePts + t);
+      const deltaStr = t > 0 ? '+' + t : '' + t;
+      return `<td><b>${afterPts}</b> <span class="muted" style="font-size:.76rem">(${deltaStr})</span>${r.events[i] ? `<div class="tag">${esc(r.events[i])}</div>` : ''}</td>`;
+    }).join('')}</tr>`).join('')}
     <tr><th>Σ</th>${g.players.map(p => `<th>${p.score}</th>`).join('')}</tr></table></div>
-    <button class="btn btn-wa block" style="margin-top:12px;font-size:1rem" onclick="openSendReportModal(S.games.find(x=>x.id==='${id}'))">📲 Enviar resultado por WhatsApp</button>
+    <div class="row" style="margin-top:12px;gap:6px">
+      <button class="btn btn-wa block" style="flex:1;font-size:.88rem" onclick="openSendReportModal(S.games.find(x=>x.id==='${id}'))">📲 Enviar / Ping</button>
+      <button class="btn ghost block" style="flex:1;font-size:.88rem" onclick="syncSingleGameToMobiles('${id}')">⚡ Enviar a móviles</button>
+    </div>
     <div class="row" style="margin-top:8px"><button class="btn danger block" onclick="S.games=S.games.filter(x=>x.id!=='${id}');save();closeModal();render()">Borrar</button>
     <button class="btn block" onclick="closeModal()">Cerrar</button></div>`);
 }
