@@ -1,5 +1,5 @@
 // ===== Chinchón – Marcador =====
-const APP_VERSION = '1.15.0';
+const APP_VERSION = '1.15.1';
 const KEY = 'chinchon-data-v1';
 const OFFICIAL_RULES = [
   ['La baraja', 'Se juega con baraja española de 40 cartas (sin ochos ni nueves). Pueden jugar de 2 a 6 jugadores.'],
@@ -34,6 +34,10 @@ const DEFAULT_ADMIN_CONFIG = {
   masterAppLock: false,
   requireInvite: true,
   authorizedGuests: [],
+  playerAliases: {
+    'anita': 'Ana'
+  },
+  localOnlyPlayers: ['Ana M'],
   potEnabled: false,
   potMinBet: 0.50,
   potDistribution: 'all',
@@ -72,6 +76,10 @@ function load() {
       if (!d.adminId) d.adminId = uid();
       d.adminConfig = Object.assign({}, DEFAULT_ADMIN_CONFIG, d.adminConfig || {});
       if (!Array.isArray(d.adminConfig.authorizedGuests)) d.adminConfig.authorizedGuests = [];
+      if (!d.adminConfig.playerAliases) d.adminConfig.playerAliases = { 'anita': 'Ana' };
+      if (!d.adminConfig.playerAliases['anita']) d.adminConfig.playerAliases['anita'] = 'Ana';
+      if (!Array.isArray(d.adminConfig.localOnlyPlayers)) d.adminConfig.localOnlyPlayers = ['Ana M'];
+      if (!d.adminConfig.localOnlyPlayers.some(p => p.toLowerCase() === 'ana m')) d.adminConfig.localOnlyPlayers.push('Ana M');
       if (d.settings && d.settings.potPerEntry === undefined) d.settings.potPerEntry = d.adminConfig.potEnabled ? d.adminConfig.potMinBet : 0;
       
       // Limpieza de partidas huérfanas en dispositivos de invitados
@@ -1950,6 +1958,49 @@ function openAdminSettings(tabName) {
         </div>
       </div>
 
+      <label>Unificación de Jugadores y Apodos</label>
+      <div class="card" style="margin-bottom:12px;padding:12px">
+        <div class="cfg-desc" style="margin-bottom:8px">
+          Vincula apodos en grupos para que sus victorias y puntos se sumen a su amigo oficial (ej: <b>Anita ➔ Ana</b>).
+        </div>
+        ${Object.keys(cfg.playerAliases || {}).length === 0 ? '<div class="muted" style="font-size:.82rem">No hay apodos vinculados</div>' : `
+          <div style="margin-bottom:8px">
+            ${Object.entries(cfg.playerAliases || {}).map(([alias, canon]) => `
+              <div class="row between" style="padding:5px 0;border-bottom:1px solid var(--line);font-size:.85rem">
+                <span><b>${esc(alias)}</b> ➔ ${esc(canon)}</span>
+                <button class="btn ghost sm" style="color:var(--accent);padding:2px 8px" onclick="removePlayerAlias('${esc(alias)}')">✕</button>
+              </div>
+            `).join('')}
+          </div>
+        `}
+        <div class="row" style="gap:4px;margin-top:6px">
+          <input id="new-alias-name" placeholder="Apodo (ej: Anita)" style="margin:0;font-size:.85rem">
+          <input id="new-canon-name" placeholder="Amigo (ej: Ana)" style="margin:0;font-size:.85rem">
+          <button class="btn sm" onclick="addPlayerAlias()">＋</button>
+        </div>
+      </div>
+
+      <label>Jugadores Locales de Mesa (Sin App)</label>
+      <div class="card" style="margin-bottom:12px;padding:12px">
+        <div class="cfg-desc" style="margin-bottom:8px">
+          Jugadores que juegan en tu mesa pero no tienen la app instalada (pueden jugar en grupos pero no saldrán en la pestaña Amigos):
+        </div>
+        ${(cfg.localOnlyPlayers || []).length === 0 ? '<div class="muted" style="font-size:.82rem">No hay jugadores locales excluidos</div>' : `
+          <div style="margin-bottom:8px">
+            ${(cfg.localOnlyPlayers || []).map(p => `
+              <div class="row between" style="padding:5px 0;border-bottom:1px solid var(--line);font-size:.85rem">
+                <span>👤 <b>${esc(p)}</b> <span class="tag muted">Solo local</span></span>
+                <button class="btn ghost sm" style="color:var(--accent);padding:2px 8px" onclick="removeLocalPlayer('${esc(p)}')">✕</button>
+              </div>
+            `).join('')}
+          </div>
+        `}
+        <div class="row" style="gap:4px;margin-top:6px">
+          <input id="new-local-name" placeholder="Nombre (ej: Ana M)" style="margin:0;font-size:.85rem">
+          <button class="btn sm" onclick="addLocalPlayer()">＋ Marcar</button>
+        </div>
+      </div>
+
       <button class="btn ghost block" style="margin-bottom:8px" onclick="broadcastAuthPolicy();toast('⚡ Permisos sincronizados en directo con todos los móviles')">⚡ Sincronizar permisos en directo ahora</button>
       <button class="btn ghost block" style="font-size:.82rem" onclick="testAsGuest()">👁️ Probar qué ve un invitado en mi móvil</button>
     `;
@@ -2395,6 +2446,51 @@ function deleteGuest(guestId) {
   openAdminSettings('auth');
 }
 
+function addPlayerAlias() {
+  const alias = ($('#new-alias-name').value || '').trim();
+  const canon = ($('#new-canon-name').value || '').trim();
+  if (!alias || !canon) return toast('Rellena ambos nombres');
+  if (!S.adminConfig.playerAliases) S.adminConfig.playerAliases = {};
+  S.adminConfig.playerAliases[alias.toLowerCase()] = canon;
+  save();
+  render();
+  openAdminSettings('auth');
+  toast(`✓ Apodo ${alias} vinculado a ${canon}`);
+}
+
+function removePlayerAlias(alias) {
+  if (S.adminConfig.playerAliases) {
+    delete S.adminConfig.playerAliases[alias.toLowerCase()];
+    save();
+    render();
+    openAdminSettings('auth');
+    toast(`Apodo ${alias} desvinculado`);
+  }
+}
+
+function addLocalPlayer() {
+  const name = ($('#new-local-name').value || '').trim();
+  if (!name) return toast('Escribe un nombre');
+  if (!Array.isArray(S.adminConfig.localOnlyPlayers)) S.adminConfig.localOnlyPlayers = [];
+  if (!S.adminConfig.localOnlyPlayers.some(p => p.toLowerCase() === name.toLowerCase())) {
+    S.adminConfig.localOnlyPlayers.push(name);
+    save();
+    render();
+    openAdminSettings('auth');
+    toast(`✓ ${name} marcado como jugador local (sin app)`);
+  }
+}
+
+function removeLocalPlayer(name) {
+  if (Array.isArray(S.adminConfig.localOnlyPlayers)) {
+    S.adminConfig.localOnlyPlayers = S.adminConfig.localOnlyPlayers.filter(p => p.toLowerCase() !== name.toLowerCase());
+    save();
+    render();
+    openAdminSettings('auth');
+    toast(`${name} desmarcado de jugadores locales`);
+  }
+}
+
 function testAsGuest() {
   localStorage.setItem('chinchon_role', 'guest');
   localStorage.setItem('chinchon_player_name', 'Invitado');
@@ -2418,53 +2514,94 @@ function broadcastPresence() {
   });
 }
 
+function getCanonicalPlayerName(rawName) {
+  if (!rawName) return '';
+  const trimmed = rawName.trim();
+  const lower = trimmed.toLowerCase();
+  const aliases = (S && S.adminConfig && S.adminConfig.playerAliases) || { 'anita': 'Ana' };
+  for (const [alias, canonical] of Object.entries(aliases)) {
+    if (alias.toLowerCase() === lower) {
+      return canonical;
+    }
+  }
+  return trimmed;
+}
+
+function isLocalOnlyPlayer(rawName) {
+  if (!rawName) return false;
+  const lower = rawName.trim().toLowerCase();
+  const locals = (S && S.adminConfig && S.adminConfig.localOnlyPlayers) || ['Ana M'];
+  return locals.some(l => l.trim().toLowerCase() === lower);
+}
+
 function getAllKnownFriends() {
   const map = new Map();
   const adminName = (S.adminConfig && S.adminConfig.adminName) || 'Juan';
-  map.set(adminName.toLowerCase(), { name: adminName, isAdmin: true });
+  map.set(adminName.toLowerCase(), { name: adminName, isAdmin: true, aliases: [] });
 
+  // 1. Amigos con pase/invitación autorizados en la app
   if (S.adminConfig && Array.isArray(S.adminConfig.authorizedGuests)) {
     S.adminConfig.authorizedGuests.forEach(g => {
       if (g && g.name) {
-        const key = g.name.trim().toLowerCase();
-        if (!map.has(key)) map.set(key, { name: g.name.trim(), guestId: g.id, pass: g.pass, status: g.status });
+        const canonical = getCanonicalPlayerName(g.name);
+        if (isLocalOnlyPlayer(canonical)) return;
+        const key = canonical.toLowerCase();
+        if (!map.has(key)) {
+          map.set(key, { name: canonical, guestId: g.id, pass: g.pass, status: g.status, aliases: [] });
+        }
       }
     });
   }
 
+  // 2. Jugadores de grupos y partidas (unificados por nombre canónico)
+  const candidateNames = [];
   if (Array.isArray(S.groups)) {
     S.groups.forEach(g => {
-      if (Array.isArray(g.players)) {
-        g.players.forEach(p => {
-          const name = (p || '').trim();
-          if (name) {
-            const key = name.toLowerCase();
-            if (!map.has(key)) map.set(key, { name });
-          }
-        });
-      }
+      if (Array.isArray(g.players)) candidateNames.push(...g.players);
+    });
+  }
+  if (Array.isArray(S.games)) {
+    S.games.forEach(g => {
+      if (Array.isArray(g.players)) candidateNames.push(...g.players.map(p => p.name));
     });
   }
 
-  if (Array.isArray(S.games)) {
-    S.games.forEach(g => {
-      if (Array.isArray(g.players)) {
-        g.players.forEach(p => {
-          const name = (p.name || '').trim();
-          if (name) {
-            const key = name.toLowerCase();
-            if (!map.has(key)) map.set(key, { name });
-          }
-        });
-      }
-    });
+  candidateNames.forEach(raw => {
+    if (!raw) return;
+    const trimmed = raw.trim();
+    if (!trimmed) return;
+    if (isLocalOnlyPlayer(trimmed)) return; // Excluye jugadoras locales sin app como Ana M
+
+    const canonical = getCanonicalPlayerName(trimmed);
+    if (isLocalOnlyPlayer(canonical)) return;
+
+    const key = canonical.toLowerCase();
+    if (!map.has(key)) {
+      map.set(key, { name: canonical, aliases: [] });
+    }
+    const entry = map.get(key);
+    if (trimmed.toLowerCase() !== canonical.toLowerCase() && !entry.aliases.includes(trimmed)) {
+      entry.aliases.push(trimmed);
+    }
+  });
+
+  // Asociar los alias definidos en la configuración
+  const aliasesCfg = (S && S.adminConfig && S.adminConfig.playerAliases) || {};
+  for (const [alias, canonical] of Object.entries(aliasesCfg)) {
+    const key = canonical.toLowerCase();
+    if (map.has(key)) {
+      const entry = map.get(key);
+      const properAlias = alias.charAt(0).toUpperCase() + alias.slice(1);
+      if (!entry.aliases.includes(properAlias)) entry.aliases.push(properAlias);
+    }
   }
+
   return Array.from(map.values());
 }
 
 function getFriendStats(friendName) {
-  const fName = friendName.trim().toLowerCase();
-  const myName = (myPlayerName || (isAdmin() ? 'Juan' : '')).trim().toLowerCase();
+  const canonicalTarget = getCanonicalPlayerName(friendName).trim().toLowerCase();
+  const myName = getCanonicalPlayerName(myPlayerName || (isAdmin() ? 'Juan' : '')).trim().toLowerCase();
   let played = 0;
   let won = 0;
   let chinchones = 0;
@@ -2476,20 +2613,20 @@ function getFriendStats(friendName) {
   if (Array.isArray(S.games)) {
     S.games.forEach(g => {
       if (!Array.isArray(g.players)) return;
-      const fPlayer = g.players.find(p => p.name.trim().toLowerCase() === fName);
+      const fPlayer = g.players.find(p => getCanonicalPlayerName(p.name).trim().toLowerCase() === canonicalTarget);
       if (fPlayer) {
         played++;
         totalPts += (fPlayer.score || 0);
         chinchones += (fPlayer.chinchones || 0);
-        if (g.winner && g.winner.trim().toLowerCase() === fName) {
+        if (g.winner && getCanonicalPlayerName(g.winner).trim().toLowerCase() === canonicalTarget) {
           won++;
         }
-        if (myName && myName !== fName) {
-          const myPlayer = g.players.find(p => p.name.trim().toLowerCase() === myName);
+        if (myName && myName !== canonicalTarget) {
+          const myPlayer = g.players.find(p => getCanonicalPlayerName(p.name).trim().toLowerCase() === myName);
           if (myPlayer) {
             headToHeadPlayed++;
-            if (g.winner && g.winner.trim().toLowerCase() === myName) myHeadWins++;
-            if (g.winner && g.winner.trim().toLowerCase() === fName) friendHeadWins++;
+            if (g.winner && getCanonicalPlayerName(g.winner).trim().toLowerCase() === myName) myHeadWins++;
+            if (g.winner && getCanonicalPlayerName(g.winner).trim().toLowerCase() === canonicalTarget) friendHeadWins++;
           }
         }
       }
@@ -2666,6 +2803,7 @@ function viewGroups() {
                   <span style="font-size:1.3rem">${f.isAdmin ? '👑' : '👤'}</span>
                   <div>
                     <b>${esc(f.name)}</b> ${isMe ? '<span class="tag">Tú</span>' : ''}
+                    ${f.aliases && f.aliases.length ? `<div class="muted" style="font-size:.72rem">Apodos en grupos: ${f.aliases.map(esc).join(', ')}</div>` : ''}
                     <div id="presence-${safeId}" style="font-size:.76rem;margin-top:1px">
                       ${isOnline ? '🟢 <span style="color:var(--ok);font-weight:600">En línea</span>' : '<span class="muted">⚪ Desconectado</span>'}
                     </div>

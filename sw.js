@@ -1,4 +1,4 @@
-const VERSION = '1.15.0';
+const VERSION = '1.15.1';
 const CACHE = 'chinchon-' + VERSION;
 const FILES = ['./', 'index.html', 'style.css', 'app.js', 'mqttws31.min.js', 'manifest.json', 'icon-192.png', 'icon-512.png', 'apple-touch-icon.png'];
 self.addEventListener('install', e => {
