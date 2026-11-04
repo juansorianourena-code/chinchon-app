@@ -1,5 +1,5 @@
 // ===== Chinchón – Marcador =====
-const APP_VERSION = '1.15.1';
+const APP_VERSION = '1.15.2';
 const KEY = 'chinchon-data-v1';
 const OFFICIAL_RULES = [
   ['La baraja', 'Se juega con baraja española de 40 cartas (sin ochos ni nueves). Pueden jugar de 2 a 6 jugadores.'],
@@ -80,6 +80,24 @@ function load() {
       if (!d.adminConfig.playerAliases['anita']) d.adminConfig.playerAliases['anita'] = 'Ana';
       if (!Array.isArray(d.adminConfig.localOnlyPlayers)) d.adminConfig.localOnlyPlayers = ['Ana M'];
       if (!d.adminConfig.localOnlyPlayers.some(p => p.toLowerCase() === 'ana m')) d.adminConfig.localOnlyPlayers.push('Ana M');
+
+      // Unificar y desduplicar invitados autorizados que usen apodos (ej: Anita -> Ana)
+      const seenGuests = new Set();
+      d.adminConfig.authorizedGuests.forEach(g => {
+        if (g && g.name) {
+          const lower = g.name.trim().toLowerCase();
+          const aliases = d.adminConfig.playerAliases || {};
+          if (aliases[lower]) g.name = aliases[lower];
+        }
+      });
+      d.adminConfig.authorizedGuests = d.adminConfig.authorizedGuests.filter(g => {
+        if (!g || !g.name) return false;
+        const lower = g.name.trim().toLowerCase();
+        if (seenGuests.has(lower)) return false;
+        seenGuests.add(lower);
+        return true;
+      });
+
       if (d.settings && d.settings.potPerEntry === undefined) d.settings.potPerEntry = d.adminConfig.potEnabled ? d.adminConfig.potMinBet : 0;
       
       // Limpieza de partidas huérfanas en dispositivos de invitados
@@ -1363,7 +1381,10 @@ function handleMqttMsg(d) {
     }
   } else if (d.type === 'challenge') {
     const myName = (myPlayerName || (isAdmin() ? 'Juan' : '')).trim().toLowerCase();
-    if (myName && d.target && d.target.trim().toLowerCase() === myName && (!S.game || S.game.roomCode !== d.roomCode)) {
+    const canonMyName = getCanonicalPlayerName(myName).toLowerCase();
+    const isTarget = (d.target && (d.target.trim().toLowerCase() === myName || d.target.trim().toLowerCase() === canonMyName)) ||
+                     (Array.isArray(d.targets) && d.targets.some(t => t.trim().toLowerCase() === myName || t.trim().toLowerCase() === canonMyName));
+    if (myName && isTarget && (!S.game || S.game.roomCode !== d.roomCode)) {
       ringBellSound();
       vibrate([100, 50, 100, 50, 200]);
       modal(`
@@ -1384,11 +1405,17 @@ function handleMqttMsg(d) {
   } else if (d.type === 'presence_ping') {
     if (d.name) {
       if (!window._onlineFriends) window._onlineFriends = {};
-      window._onlineFriends[d.name.trim().toLowerCase()] = Date.now();
+      const rawLower = d.name.trim().toLowerCase();
+      const canonLower = getCanonicalPlayerName(d.name).trim().toLowerCase();
+      window._onlineFriends[rawLower] = Date.now();
+      window._onlineFriends[canonLower] = Date.now();
       if (tab === 'groups') {
-        const safeId = d.name.trim().toLowerCase().replace(/[^a-z0-9]/g, '_');
-        const indicator = document.getElementById('presence-' + safeId);
-        if (indicator) indicator.innerHTML = '🟢 <span style="color:var(--ok);font-size:.76rem;font-weight:600">En línea</span>';
+        const safeIdRaw = rawLower.replace(/[^a-z0-9]/g, '_');
+        const safeIdCanon = canonLower.replace(/[^a-z0-9]/g, '_');
+        const elRaw = document.getElementById('presence-' + safeIdRaw);
+        if (elRaw) elRaw.innerHTML = '🟢 <span style="color:var(--ok);font-size:.76rem;font-weight:600">En línea</span>';
+        const elCanon = document.getElementById('presence-' + safeIdCanon);
+        if (elCanon) elCanon.innerHTML = '🟢 <span style="color:var(--ok);font-size:.76rem;font-weight:600">En línea</span>';
       }
     }
   } else if (d.type === 'spectator_joined') {
@@ -2728,10 +2755,15 @@ function challengeFriend(targetName) {
     sendMqtt({ type: 'sync', game: S.game, draft });
   });
 
+  const friendObj = getAllKnownFriends().find(f => f.name.toLowerCase() === targetName.toLowerCase());
+  const targetAliases = friendObj && friendObj.aliases ? friendObj.aliases : [];
+  const allTargets = [targetName, ...targetAliases];
+
   sendGlobalMqtt({
     type: 'challenge',
     from: myName,
     target: targetName,
+    targets: allTargets,
     roomCode: room
   });
 
@@ -2794,7 +2826,10 @@ function viewGroups() {
         ${friends.map(f => {
           const isMe = f.name.trim().toLowerCase() === myName;
           const st = getFriendStats(f.name);
-          const isOnline = window._onlineFriends && (Date.now() - (window._onlineFriends[f.name.trim().toLowerCase()] || 0) < 120000);
+          const isOnline = window._onlineFriends && (
+            (Date.now() - (window._onlineFriends[f.name.trim().toLowerCase()] || 0) < 120000) ||
+            (Array.isArray(f.aliases) && f.aliases.some(a => Date.now() - (window._onlineFriends[a.trim().toLowerCase()] || 0) < 120000))
+          );
           const safeId = f.name.trim().toLowerCase().replace(/[^a-z0-9]/g, '_');
           return `
             <div class="card" style="padding:10px 12px;margin-bottom:8px">
