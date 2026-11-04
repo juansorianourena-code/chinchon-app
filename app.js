@@ -1,5 +1,5 @@
 // ===== Chinchón – Marcador =====
-const APP_VERSION = '1.14.0';
+const APP_VERSION = '1.15.0';
 const KEY = 'chinchon-data-v1';
 const OFFICIAL_RULES = [
   ['La baraja', 'Se juega con baraja española de 40 cartas (sin ochos ni nueves). Pueden jugar de 2 a 6 jugadores.'],
@@ -454,7 +454,8 @@ function render() {
 let selGroup = null;
 function viewPlay() {
   const guestBanner = !isAdmin() ? `<div style="background:var(--paper2);border:1px dashed var(--accent);border-radius:6px;padding:8px 12px;margin-bottom:12px;display:flex;justify-content:space-between;align-items:center;font-size:.85rem"><span>👤 <b>Modo Invitado</b> · Propiedad de Juan</span><button class="btn sm" style="padding:5px 10px;font-size:.8rem" onclick="promptAdminPin()">👑 Volver a Admin</button></div>` : '';
-  
+  const liveTablesCard = `<div id="live-tables-section">${renderLiveTablesCard()}</div>`;
+
   const joinByCodeCard = `
     <div class="card" style="margin-bottom:14px;background:var(--paper2);border:1px solid var(--ink)">
       <div style="font-weight:700;font-size:.92rem;margin-bottom:3px;display:flex;align-items:center;gap:6px">
@@ -469,10 +470,10 @@ function viewPlay() {
   `;
 
   const st = S.settings;
-  if (!S.groups.length) return guestBanner + joinByCodeCard + `<div class="hero"><img src="icon-192.png" alt="Chinchón"><h2>¡Bienvenido!</h2>
+  if (!S.groups.length) return guestBanner + liveTablesCard + joinByCodeCard + `<div class="hero"><img src="icon-192.png" alt="Chinchón"><h2>¡Bienvenido!</h2>
     <p class="muted">Primero crea un grupo con los jugadores o únete arriba con código.</p><button id="go-groups" class="btn block" onclick="tab='groups';render();openGroupForm()">Crear grupo</button></div>`;
   if (!selGroup || !S.groups.find(g => g.id === selGroup)) selGroup = S.groups[0].id;
-  return guestBanner + joinByCodeCard + `<div class="hero" style="padding:14px"><img src="icon-192.png" alt="Chinchón"></div>
+  return guestBanner + liveTablesCard + joinByCodeCard + `<div class="hero" style="padding:14px"><img src="icon-192.png" alt="Chinchón"></div>
   <h2>¿Quién juega?</h2>
   ${S.groups.map(g => `<div class="card row between" onclick="selGroup='${g.id}';render()" style="cursor:pointer;${g.id === selGroup ? 'border-color:var(--ink)' : ''}">
      <div><b>${esc(g.name)}</b><div class="muted">${g.players.map(esc).join(' · ')}</div></div><div>${g.id === selGroup ? '<b style="color:var(--accent)">●</b>' : '<span class="muted">○</span>'}</div></div>`).join('')}
@@ -551,6 +552,7 @@ function startNewGame(mode) {
       targets: g.players.map(p => p.trim())
     });
     toast(`📡 Invitación automática enviada a los móviles de ${g.name}`);
+    setTimeout(broadcastTableAlive, 600);
     setTimeout(() => openShareModal(), 350);
   }
 }
@@ -567,9 +569,10 @@ function viewGame() {
   const roomActive = !!(G.roomCode && currentRoomCode);
   
   // Determinamos el rol: Solo somos anfitrión si tenemos la sesión de Administrador de Juan
-  isHost = isAdmin() && (!G.adminId || G.adminId === S.adminId);
+  isHost = isAdmin() || (!G.adminId || G.adminId === S.adminId);
   syncMyPlayerIndex();
   const isGuest = !isHost && myPlayerIndex !== null;
+  const isSpectator = !isHost && myPlayerIndex === null;
 
   // Barra de cabecera según rol
   let topHeader = '';
@@ -578,12 +581,25 @@ function viewGame() {
       <span>👑 <b>Eres el Administrador</b> ${G.mode === 'online' ? '· Sala ' + esc(G.roomCode) : '· Modo clásico'}</span>
       <span>${G.mode === 'online' ? '<button class="btn ghost sm" onclick="openShareModal()">🔗 Invitar / Enlace</button>' : ''}</span>
     </div>`;
+  } else if (isSpectator) {
+    topHeader = `<div class="row between" style="background:#203126;color:#c2eed2;border:1px solid var(--ok);border-radius:6px;padding:8px 12px;margin-bottom:10px;font-size:.85rem">
+      <span>👁️ <b>Modo Espectador</b> · Viendo mesa ${esc(G.roomCode)}</span>
+      <button class="btn ghost sm" style="padding:4px 10px;font-size:.8rem;color:#c2eed2;border-color:#c2eed2" onclick="leaveCurrentGame()">🚪 Salir al inicio</button>
+    </div>`;
   } else {
     topHeader = `<div class="row between" style="background:var(--paper2);border:1px solid var(--ink);border-radius:6px;padding:8px 12px;margin-bottom:10px;font-size:.85rem">
       <span>${roomActive ? `<i class="live-dot"></i> <b>Mesa ${esc(G.roomCode)}</b>` : '👤 <b>Mesa de juego</b>'}</span>
       <button class="btn ghost sm" style="padding:4px 10px;font-size:.8rem;color:var(--accent);border-color:var(--accent)" onclick="leaveCurrentGame()">🚪 Salir al inicio</button>
     </div>`;
   }
+
+  // Lista de espectadores viendo la partida en vivo
+  const specList = Array.isArray(window._activeSpectators) ? window._activeSpectators : [];
+  const specBanner = specList.length ? `
+    <div style="background:var(--paper2);padding:6px 10px;border-radius:6px;font-size:.8rem;margin-bottom:10px;display:flex;align-items:center;gap:6px">
+      <span>👁️</span> <span><b>Espectadores viendo la partida:</b> ${specList.map(esc).join(', ')}</span>
+    </div>
+  ` : '';
 
   // Bote acumulado si aplica
   const potVal = st.potPerEntry || 0;
@@ -624,7 +640,7 @@ function viewGame() {
     `}
   </div>` : '';
 
-  return `${topHeader}${potBanner}${guestBanner}
+  return `${topHeader}${specBanner}${potBanner}${guestBanner}
   <div class="row between muted" style="margin-bottom:10px"><span>${esc(G.groupName)} · Ronda ${G.rounds.length + 1}</span>
     <span>Límite ${st.limit} · Reeng. ${st.maxRejoins}</span></div>
   <div class="dealer" ${isHost ? 'onclick="nextDealer()"' : ''}><span class="muted">Reparte</span> <b>${esc(dealerPlayer.name)}</b> ${isHost ? '<span class="muted">· tocar para cambiar</span>' : ''}</div>
@@ -661,10 +677,13 @@ function viewGame() {
     <div class="sticky-actions">
       ${G.rounds.length ? '<button class="btn ghost" onclick="undoRound()">↩️</button>' : ''}
       <button id="btn-close-round" class="btn block" onclick="closeRound()">Apuntar ronda</button>
+    </div>` : (isSpectator ? `
+    <div class="card" style="text-align:center;padding:12px;background:var(--paper2);margin-top:14px">
+      <span class="muted">👁️ Modo espectador: viendo los marcadores en directo</span>
     </div>` : `
     <div class="card" style="text-align:center;padding:12px;background:var(--paper2);margin-top:14px">
       <span class="muted">👑 Esperando a que el Administrador cierre la ronda</span>
-    </div>`}
+    </div>`)}
   ${G.rounds.length ? `<h2>Rondas</h2><div class="card" style="overflow-x:auto"><table><tr><th>#</th>${G.players.map(p => `<th>${esc(p.name)}</th>`).join('')}</tr>
     ${G.rounds.map((r, n) => `<tr><td class="tag">${n + 1}</td>${r.totals.map((t, i) => {
       if (t === null) return `<td><span class="muted">–</span>${r.events[i] ? `<div class="tag">${esc(r.events[i])}</div>` : ''}</td>`;
@@ -830,11 +849,14 @@ function abandonGame() {
 
 function confirmAbandonGame() {
   sendMqtt({ type: 'game_abandoned' });
+  sendGlobalMqtt({ type: 'table_closed', roomCode: currentRoomCode });
   S.game = null;
   draft = {};
   remoteDrafts = {};
   remoteTyping = {};
   currentRoomCode = null;
+  window._isSpectator = false;
+  window._activeSpectators = [];
   save();
   closeModal();
   render();
@@ -850,6 +872,12 @@ function leaveCurrentGame() {
 }
 
 function confirmLeaveGame() {
+  if (window._isSpectator) {
+    const watcher = myPlayerName || (isAdmin() ? 'Juan' : 'Un espectador');
+    sendMqtt({ type: 'spectator_left', name: watcher });
+  }
+  window._isSpectator = false;
+  window._activeSpectators = [];
   if (S.game && S.game.winner) {
     if (!S.games) S.games = [];
     if (!S.games.find(g => g.id === S.game.id)) S.games.unshift(S.game);
@@ -870,7 +898,8 @@ function finishGame(wi, how) {
   const G = S.game; G.winner = G.players[wi].name; G.how = how; G.end = Date.now();
   sendMqtt({ type: 'sync', game: G, draft: {} });
   sendMqtt({ type: 'history_sync', game: G });
-  S.games.unshift(G); S.game = null; draft = {}; remoteDrafts = {}; remoteTyping = {}; save(); render();
+  sendGlobalMqtt({ type: 'table_closed', roomCode: G.roomCode });
+  S.games.unshift(G); S.game = null; draft = {}; remoteDrafts = {}; remoteTyping = {}; window._isSpectator = false; window._activeSpectators = []; save(); render();
   winModal(G);
 }
 function winModal(G) {
@@ -1036,6 +1065,82 @@ function joinRoomByInputCode() {
   directJoinRoom(val);
 }
 
+function renderLiveTablesCard() {
+  if (!window._activeTables) return '';
+  const now = Date.now();
+  const tables = Object.values(window._activeTables).filter(t => (now - (t.lastSeen || 0) < 50000) && (!S.game || S.game.roomCode !== t.roomCode));
+  if (!tables.length) return '';
+
+  return `
+    <div class="card" style="margin-bottom:14px;border:1.5px solid var(--ok);background:var(--paper2)">
+      <div class="row between" style="margin-bottom:6px">
+        <span style="font-weight:700;font-size:.9rem;color:var(--ok)">
+          <i class="live-dot"></i> 🔴 Partidas en Directo ahora (${tables.length})
+        </span>
+      </div>
+      ${tables.map(t => `
+        <div class="row between" style="padding:8px 0;border-top:1px solid var(--line);align-items:center">
+          <div>
+            <b>${esc(t.groupName || 'Partida de Chinchón')}</b> <span class="tag" style="margin-left:4px;font-family:monospace">${esc(t.roomCode)}</span>
+            <div class="muted" style="font-size:.78rem;margin-top:2px">
+              Jugadores: ${Array.isArray(t.players) ? t.players.map(p => esc(p.name || p)).join(' · ') : 'Varios'} · Ronda ${t.roundsCount + 1}
+            </div>
+          </div>
+          <button class="btn sm" style="white-space:nowrap;padding:5px 10px;font-size:.8rem" onclick="watchLiveGame('${esc(t.roomCode)}')">👁️ Mirar partida</button>
+        </div>
+      `).join('')}
+    </div>
+  `;
+}
+
+function watchLiveGame(roomCode) {
+  if (!roomCode) return;
+  window._isSpectator = true;
+  window._identityChosen = true;
+
+  if (localStorage.getItem('chinchon_role') !== 'admin') {
+    localStorage.setItem('chinchon_role', 'guest');
+  }
+  isHost = isAdmin(); // Si Juan entra a mirar, tiene autoridad de Administrador para tocar marcadores
+
+  if (S.game && S.game.roomCode && S.game.roomCode !== roomCode) {
+    if (S.game.winner) {
+      if (!S.games) S.games = [];
+      if (!S.games.find(g => g.id === S.game.id)) S.games.unshift(S.game);
+    }
+    S.game = null;
+    draft = {};
+    remoteDrafts = {};
+    remoteTyping = {};
+    guestLastSent = null;
+    save();
+  }
+
+  currentRoomCode = roomCode;
+  initMqtt(roomCode, () => {
+    sendMqtt({ type: 'reqSync' });
+    const watcher = myPlayerName || (isAdmin() ? 'Juan' : 'Un amigo');
+    sendMqtt({ type: 'spectator_joined', name: watcher });
+  });
+
+  tab = 'play';
+  render();
+  toast(`👁️ Conectado a la mesa ${roomCode} como espectador`);
+}
+
+function broadcastTableAlive() {
+  if (!S.game || S.game.mode !== 'online' || !S.game.roomCode) return;
+  sendGlobalMqtt({
+    type: 'table_alive',
+    roomCode: S.game.roomCode,
+    groupName: S.game.groupName,
+    hostName: (isAdmin() ? 'Juan' : (myPlayerName || 'Anfitrión')),
+    players: S.game.players.map(p => ({ name: p.name, score: p.score, out: p.out })),
+    roundsCount: S.game.rounds.length,
+    time: Date.now()
+  });
+}
+
 function handleMqttMsg(d) {
   if (!d || !d.type) return;
   if (d.from && d.from === CLIENT_ID) return; // ignorar el eco de mis propios mensajes
@@ -1071,7 +1176,7 @@ function handleMqttMsg(d) {
       syncMyPlayerIndex();
       save();
       render();
-      if (!isHost && currentRoomCode && (myPlayerIndex === null || !myPlayerName || myPlayerName === 'Invitado') && !window._identityChosen) {
+      if (!isHost && !window._isSpectator && currentRoomCode && (myPlayerIndex === null || !myPlayerName || myPlayerName === 'Invitado') && !window._identityChosen) {
         promptJoinIdentity(currentRoomCode);
       }
     }
@@ -1276,6 +1381,38 @@ function handleMqttMsg(d) {
         const safeId = d.name.trim().toLowerCase().replace(/[^a-z0-9]/g, '_');
         const indicator = document.getElementById('presence-' + safeId);
         if (indicator) indicator.innerHTML = '🟢 <span style="color:var(--ok);font-size:.76rem;font-weight:600">En línea</span>';
+      }
+    }
+  } else if (d.type === 'spectator_joined') {
+    if (d.name) {
+      if (!window._activeSpectators) window._activeSpectators = [];
+      const clean = d.name.trim();
+      if (!window._activeSpectators.includes(clean)) window._activeSpectators.push(clean);
+      ringBellSound();
+      vibrate([60, 40, 80]);
+      toast(`👁️ ¡${clean} está viendo la partida!`);
+      if (S.game) render();
+    }
+  } else if (d.type === 'spectator_left') {
+    if (d.name && window._activeSpectators) {
+      window._activeSpectators = window._activeSpectators.filter(x => x !== d.name.trim());
+      if (S.game) render();
+    }
+  } else if (d.type === 'table_alive') {
+    if (d.roomCode) {
+      if (!window._activeTables) window._activeTables = {};
+      window._activeTables[d.roomCode] = { ...d, lastSeen: Date.now() };
+      if (!S.game && (tab === 'play' || tab === 'groups')) {
+        const sec = document.getElementById('live-tables-section') || document.getElementById('live-tables-section-groups');
+        if (sec) sec.innerHTML = renderLiveTablesCard();
+      }
+    }
+  } else if (d.type === 'table_closed') {
+    if (d.roomCode && window._activeTables) {
+      delete window._activeTables[d.roomCode];
+      if (!S.game && (tab === 'play' || tab === 'groups')) {
+        const sec = document.getElementById('live-tables-section') || document.getElementById('live-tables-section-groups');
+        if (sec) sec.innerHTML = renderLiveTablesCard();
       }
     }
   }
@@ -2509,6 +2646,7 @@ function viewGroups() {
   const myName = (myPlayerName || (isAdmin() ? 'Juan' : '')).trim().toLowerCase();
 
   return `
+    <div id="live-tables-section-groups">${renderLiveTablesCard()}</div>
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
       <h2 style="margin:0">👥 Amigos de Chinchón (${friends.length})</h2>
       ${isAdmin() ? '<button class="btn sm" onclick="createGuestInviteModal()">＋ Añadir Amigo</button>' : ''}
@@ -2725,6 +2863,8 @@ requestWakeLock();
 applyTheme();
 setTimeout(broadcastPresence, 1200);
 setInterval(broadcastPresence, 45000);
+setTimeout(broadcastTableAlive, 1500);
+setInterval(broadcastTableAlive, 20000);
 if (S && S.adminConfig && S.adminConfig.openMessageEnabled && S.adminConfig.openMessageText) {
   showOpenMessage(S.adminConfig.openMessageText);
 }
