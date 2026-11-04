@@ -225,3 +225,39 @@ body.dark .live-bar { background: #1f2e25; color: #bfe6cd; }
 body.dark .pot-card { background: #2d2818; border-color: #5a4d22; }
 body.dark input, body.dark select, body.dark textarea { background: #2b2924; color: var(--ink); border-color: var(--line); }
 body.dark .btn.ghost { color: var(--ink); }
+
+/* Pantalla de bloqueo y autoridad de Juan */
+.role-pill {
+  font-size: .70rem;
+  font-weight: 600;
+  padding: 3px 8px;
+  border-radius: 12px;
+  background: var(--paper2);
+  color: var(--ink2);
+  border: 1px solid var(--line);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.role-pill.admin {
+  background: #fbf0ec;
+  color: var(--accent);
+  border-color: #f3c7b7;
+}
+body.dark .role-pill.admin {
+  background: #38241f;
+  color: #ff9d85;
+  border-color: #5c382e;
+}
+.lockscreen {
+  position: fixed; inset: 0; z-index: 99999;
+  background: var(--paper);
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  padding: 28px 20px; text-align: center;
+}
+.lockscreen.hidden { display: none !important; }
+.lock-icon { font-size: 3.6rem; margin-bottom: 12px; animation: pulse 2.2s infinite; }
+@keyframes pulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.08); } }
+.lock-title { font-family: var(--serif); font-size: 1.55rem; margin: 0 0 10px; color: var(--accent); }
+.lock-text { color: var(--ink2); max-width: 320px; line-height: 1.5; margin: 0 0 24px; font-size: .95rem; }
+.lock-actions { width: 100%; max-width: 290px; display: flex; flex-direction: column; gap: 8px; }
+.lock-foot { margin-top: 32px; font-size: .78rem; color: var(--ink2); }

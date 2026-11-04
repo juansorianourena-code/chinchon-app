@@ -1,5 +1,5 @@
 // ===== Chinchón – Marcador =====
-const APP_VERSION = '1.11.0';
+const APP_VERSION = '1.12.0';
 const KEY = 'chinchon-data-v1';
 const OFFICIAL_RULES = [
   ['La baraja', 'Se juega con baraja española de 40 cartas (sin ochos ni nueves). Pueden jugar de 2 a 6 jugadores.'],
@@ -30,6 +30,10 @@ const vibrate = (ms = 15) => {
 
 const DEFAULT_ADMIN_CONFIG = {
   adminName: 'Juan',
+  adminPin: '1234',
+  masterAppLock: false,
+  requireInvite: true,
+  authorizedGuests: [],
   potEnabled: false,
   potMinBet: 0.50,
   potDistribution: 'all',
@@ -67,6 +71,7 @@ function load() {
     if (d) {
       if (!d.adminId) d.adminId = uid();
       d.adminConfig = Object.assign({}, DEFAULT_ADMIN_CONFIG, d.adminConfig || {});
+      if (!Array.isArray(d.adminConfig.authorizedGuests)) d.adminConfig.authorizedGuests = [];
       if (d.settings && d.settings.potPerEntry === undefined) d.settings.potPerEntry = d.adminConfig.potEnabled ? d.adminConfig.potMinBet : 0;
       return d;
     }
@@ -90,6 +95,228 @@ function closeModal() {
     fn();
   }
 }
+
+// ===== SISTEMA DE AUTORIZACIÓN & IDENTIDAD DE JUAN =====
+function isAdmin() {
+  const r = localStorage.getItem('chinchon_role');
+  if (r === 'admin') return true;
+  if (r === 'guest') return false;
+  // Dispositivo maestro original de Juan
+  if (S && S.adminConfig && S.adminConfig.adminName === 'Juan') {
+    localStorage.setItem('chinchon_role', 'admin');
+    return true;
+  }
+  return false;
+}
+
+function updateRolePill() {
+  const p = $('#role-pill');
+  if (!p) return;
+  if (isAdmin()) {
+    p.className = 'role-pill admin';
+    p.innerHTML = '👑 Administrador';
+    p.title = 'Eres el Administrador (Juan). Toca para ver permisos.';
+  } else {
+    p.className = 'role-pill';
+    const n = (myPlayerName || localStorage.getItem('chinchon_player_name') || 'Invitado').trim();
+    p.innerHTML = `👤 ${esc(n)} · 👑 Juan`;
+    p.title = 'Estás como invitado. Aplicación administrada por Juan.';
+  }
+}
+
+function handleRolePillClick() {
+  if (isAdmin()) openAdminSettings('auth');
+  else openAdminSettings();
+}
+
+function getCachedRemoteAuth() {
+  try {
+    const raw = localStorage.getItem('chinchon_remote_auth');
+    return raw ? JSON.parse(raw) : null;
+  } catch(e) { return null; }
+}
+
+function checkAccessControl() {
+  const lockEl = $('#lockscreen');
+  if (!lockEl) return true;
+
+  if (isAdmin()) {
+    lockEl.classList.add('hidden');
+    updateRolePill();
+    return true;
+  }
+
+  const remoteAuth = getCachedRemoteAuth();
+  const masterLock = (remoteAuth && remoteAuth.masterAppLock !== undefined)
+    ? remoteAuth.masterAppLock
+    : (S && S.adminConfig && S.adminConfig.masterAppLock);
+
+  const myName = (myPlayerName || localStorage.getItem('chinchon_player_name') || '').trim().toLowerCase();
+  const myPass = (localStorage.getItem('chinchon_guest_pass') || '').trim();
+
+  // 1. Apagado maestro (Killswitch)
+  if (masterLock) {
+    showLockScreen({
+      icon: '🔒',
+      title: 'Aplicación en Pausa',
+      text: 'Juan (Administrador) ha pausado temporalmente el uso de la aplicación para todos los invitados. Vuelve a consultar más tarde o contacta con Juan.'
+    });
+    return false;
+  }
+
+  // 2. Comprobar si está bloqueado individualmente
+  let isBlocked = false;
+  if (remoteAuth && Array.isArray(remoteAuth.blocked)) {
+    isBlocked = remoteAuth.blocked.some(b => (myPass && b.pass === myPass) || (myName && b.name === myName));
+  } else if (S && S.adminConfig && Array.isArray(S.adminConfig.authorizedGuests)) {
+    isBlocked = S.adminConfig.authorizedGuests.some(g => g.status === 'blocked' && ((myPass && g.pass === myPass) || (myName && g.name.trim().toLowerCase() === myName)));
+  }
+
+  if (isBlocked) {
+    showLockScreen({
+      icon: '⛔',
+      title: 'Acceso Revocado',
+      text: `Esta aplicación es propiedad privada de Juan. Tu permiso de uso (${esc(myPlayerName || 'Invitado')}) ha sido revocado por el Administrador.`
+    });
+    return false;
+  }
+
+  // 3. Exigir pase de invitación
+  const reqInvite = (remoteAuth && remoteAuth.requireInvite !== undefined)
+    ? remoteAuth.requireInvite
+    : (S && S.adminConfig && S.adminConfig.requireInvite !== false);
+
+  if (reqInvite && !myPass && !myName) {
+    showLockScreen({
+      icon: '🔐',
+      title: 'Aplicación Privada de Juan',
+      text: 'Para poder utilizar este marcador necesitas un enlace de invitación personal enviado por Juan.'
+    });
+    return false;
+  }
+
+  lockEl.classList.add('hidden');
+  updateRolePill();
+  return true;
+}
+
+function showLockScreen({ title, text, icon }) {
+  const lockEl = $('#lockscreen');
+  if (!lockEl) return;
+  lockEl.innerHTML = `
+    <div class="lock-icon">${icon || '🔒'}</div>
+    <h2 class="lock-title">${esc(title)}</h2>
+    <p class="lock-text">${esc(text)}</p>
+    <div class="lock-actions">
+      <button class="btn block" onclick="retryAuth()">🔄 Comprobar si me han desbloqueado</button>
+      <button class="btn ghost block" onclick="promptAdminPin()">👑 ¿Eres Juan? Entrar con PIN</button>
+    </div>
+    <div class="lock-foot">👑 Marcador de Chinchón · Propiedad de Juan</div>
+  `;
+  lockEl.classList.remove('hidden');
+  updateRolePill();
+}
+
+function retryAuth() {
+  toast('Comprobando autorización con Juan...');
+  if (mqttClient && mqttClient.isConnected && mqttClient.isConnected()) {
+    try {
+      const m = new Paho.MQTT.Message(JSON.stringify({ type: 'auth_query', from: CLIENT_ID, name: myPlayerName, pass: localStorage.getItem('chinchon_guest_pass') }));
+      m.destinationName = 'chinchon/v1/auth_global';
+      m.qos = 1;
+      mqttClient.send(m);
+    } catch(e) {}
+  }
+  setTimeout(() => {
+    checkAccessControl();
+    if (!$('#lockscreen').classList.contains('hidden')) {
+      toast('Sigues bloqueado o sin permiso');
+    } else {
+      toast('✓ ¡Acceso autorizado!');
+      render();
+    }
+  }, 900);
+}
+
+function promptAdminPin() {
+  modal(`<h2>👑 Iniciar sesión como Administrador</h2>
+    <p class="muted">Introduce tu PIN de Administrador (Juan) para desbloquear el control total en este dispositivo:</p>
+    <input id="adm-pin-input" type="password" inputmode="numeric" placeholder="PIN" style="font-size:1.4rem;letter-spacing:6px;text-align:center;margin:12px 0">
+    <div class="row">
+      <button class="btn ghost block" onclick="closeModal()">Cancelar</button>
+      <button class="btn block" onclick="verifyAdminPin()">Entrar</button>
+    </div>`);
+  setTimeout(() => { const el = $('#adm-pin-input'); if (el) el.focus(); }, 150);
+}
+
+function verifyAdminPin() {
+  const pin = ($('#adm-pin-input').value || '').trim();
+  const correct = (S && S.adminConfig && S.adminConfig.adminPin) || '1234';
+  if (pin === correct) {
+    localStorage.setItem('chinchon_role', 'admin');
+    closeModal();
+    const lockEl = $('#lockscreen');
+    if (lockEl) lockEl.classList.add('hidden');
+    toast('👑 ¡Bienvenido Juan! Modo Administrador activado');
+    render();
+    openAdminSettings('auth');
+  } else {
+    toast('❌ PIN incorrecto');
+    vibrate([80, 50, 80]);
+  }
+}
+
+function checkAuthParams() {
+  if (typeof window === 'undefined' || !window.location) return;
+  try {
+    const urlP = new URLSearchParams(window.location.search);
+    const hashP = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+    
+    const gName = (urlP.get('guest') || hashP.get('guest') || '').trim();
+    const gPass = (urlP.get('pass') || hashP.get('pass') || '').trim();
+    if (gName) {
+      localStorage.setItem('chinchon_role', 'guest');
+      localStorage.setItem('chinchon_player_name', gName);
+      myPlayerName = gName;
+      if (gPass) localStorage.setItem('chinchon_guest_pass', gPass);
+      const cleanUrl = location.pathname + (urlP.get('room') ? '?room=' + urlP.get('room') : '');
+      window.history.replaceState({}, document.title, cleanUrl);
+      toast(`👋 ¡Hola ${gName}! Invitado a la app de Juan.`);
+    }
+
+    const pin = (urlP.get('admin_pin') || hashP.get('admin_pin') || '').trim();
+    if (pin && S && S.adminConfig && pin === S.adminConfig.adminPin) {
+      localStorage.setItem('chinchon_role', 'admin');
+      window.history.replaceState({}, document.title, location.pathname);
+      toast('👑 Acceso de Administrador concedido');
+    }
+  } catch(e) {}
+}
+
+function broadcastAuthPolicy() {
+  const payload = {
+    type: 'auth_broadcast',
+    masterAppLock: !!(S.adminConfig && S.adminConfig.masterAppLock),
+    requireInvite: !!(S.adminConfig && S.adminConfig.requireInvite),
+    blocked: (S.adminConfig && S.adminConfig.authorizedGuests || []).filter(g => g.status === 'blocked').map(g => ({
+      name: (g.name || '').trim().toLowerCase(),
+      pass: g.pass
+    }))
+  };
+  sendAuthMqtt(payload);
+  save();
+}
+
+function sendAuthMqtt(payload) {
+  if (!mqttClient || !mqttClient.isConnected || !mqttClient.isConnected()) return;
+  try {
+    payload.from = CLIENT_ID;
+    const m = new Paho.MQTT.Message(JSON.stringify(payload));
+    m.destinationName = 'chinchon/v1/auth_global';
+    m.qos = 1;
+    mqttClient.send(m);
+  } catch(e) {}
+}
 function showOpenMessage(customText) {
   const text = (customText !== undefined && customText !== null && String(customText).trim())
     ? String(customText).trim()
@@ -106,6 +333,8 @@ $('#modal').addEventListener('click', e => { if (e.target.id === 'modal') closeM
 document.querySelectorAll('.tabbar button').forEach(b => b.onclick = () => { tab = b.dataset.tab; vibrate(); render(); });
 
 function render() {
+  updateRolePill();
+  if (!checkAccessControl()) return;
   document.querySelectorAll('.tabbar button').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
   const titles = { play: S.game ? 'Partida en juego' : 'Chinchón', groups: 'Grupos', history: 'Historial', rules: 'Normas' };
   $('#title').textContent = titles[tab];
@@ -220,8 +449,8 @@ function viewGame() {
   const dealerPlayer = G.players[dealerIdx] || G.players[0] || { name: '–' };
   const roomActive = !!(G.roomCode && currentRoomCode);
   
-  // Determinamos el rol: Si coincide el adminId somos el Administrador supremo
-  if (G.adminId) isHost = (G.adminId === S.adminId);
+  // Determinamos el rol: Solo somos anfitrión si tenemos la sesión de Administrador de Juan
+  isHost = isAdmin() && (!G.adminId || G.adminId === S.adminId);
   syncMyPlayerIndex();
   const isGuest = !isHost && myPlayerIndex !== null;
 
@@ -540,7 +769,10 @@ function initMqtt(roomCode, onConnect) {
     mqttClient.connect({
       useSSL: true, timeout: 6, cleanSession: true, keepAliveInterval: 30,
       onSuccess: () => {
-        mqttClient.subscribe(`chinchon/v1/${roomCode}`, { qos: 1 });
+        try { mqttClient.subscribe('chinchon/v1/auth_global', { qos: 1 }); } catch(e) {}
+        if (roomCode && roomCode !== 'auth_global') {
+          mqttClient.subscribe(`chinchon/v1/${roomCode}`, { qos: 1 });
+        }
         if (onConnect) onConnect();
         if (!isHost || !S.game) sendMqtt({ type: 'reqSync' });
       },
@@ -559,7 +791,10 @@ function fallbackHiveMqtt(roomCode, onConnect) {
     mqttClient.connect({
       useSSL: true, timeout: 6, cleanSession: true, keepAliveInterval: 30,
       onSuccess: () => {
-        mqttClient.subscribe(`chinchon/v1/${roomCode}`, { qos: 1 });
+        try { mqttClient.subscribe('chinchon/v1/auth_global', { qos: 1 }); } catch(e) {}
+        if (roomCode && roomCode !== 'auth_global') {
+          mqttClient.subscribe(`chinchon/v1/${roomCode}`, { qos: 1 });
+        }
         if (onConnect) onConnect();
         if (!isHost || !S.game) sendMqtt({ type: 'reqSync' });
       }
@@ -568,17 +803,28 @@ function fallbackHiveMqtt(roomCode, onConnect) {
 }
 
 function sendMqtt(data) {
-  if (!mqttClient || !mqttClient.isConnected || !mqttClient.isConnected() || !currentRoomCode) return;
+  if (!mqttClient || !mqttClient.isConnected || !mqttClient.isConnected()) return;
   try {
     data.from = CLIENT_ID;
     const m = new Paho.MQTT.Message(JSON.stringify(data));
-    m.destinationName = `chinchon/v1/${currentRoomCode}`;
+    m.destinationName = `chinchon/v1/${currentRoomCode || 'auth_global'}`;
     m.qos = 1;
     mqttClient.send(m);
   } catch(e) {}
 }
 
 function handleMqttMsg(d) {
+  if (!d || !d.type) return;
+  if (d.from && d.from === CLIENT_ID) return; // ignorar el eco de mis propios mensajes
+  if (d.type === 'auth_broadcast') {
+    localStorage.setItem('chinchon_remote_auth', JSON.stringify(d));
+    checkAccessControl();
+    return;
+  }
+  if (d.type === 'auth_query') {
+    if (isAdmin()) broadcastAuthPolicy();
+    return;
+  }
   if (!d || !d.type) return;
   if (d.from && d.from === CLIENT_ID) return; // ignorar el eco de mis propios mensajes
   if (d.type === 'sync') {
@@ -965,7 +1211,7 @@ function openSendReportModal(game) {
 }
 
 // ===== PANEL DE CONFIGURACIÓN DE JUAN (ADMINISTRADOR) =====
-let adminCurrentTab = 'room';
+let adminCurrentTab = 'auth';
 
 function openAdminSettings(tabName) {
   if (tabName) adminCurrentTab = tabName;
@@ -973,10 +1219,18 @@ function openAdminSettings(tabName) {
   const G = S.game;
   
   // Si no es el Administrador (por ejemplo si un invitado toca el engranaje)
-  if (!isHost && G) {
+  if (!isAdmin()) {
     return modal(`<h2>⚙️ Ajustes</h2>
-      <p class="muted">Estás jugando como <b>${esc(myPlayerName || 'Invitado')}</b>.</p>
-      <div class="card" style="margin:14px 0">
+      <div class="card" style="text-align:center;padding:16px 12px;margin:8px 0 12px">
+        <div style="font-size:2.4rem;margin-bottom:4px">👤</div>
+        <h2 style="margin:0 0 4px;font-size:1.3rem;border:0">${esc(myPlayerName || 'Invitado')}</h2>
+        <span class="muted" style="font-size:.85rem">Invitado Autorizado</span>
+        <div style="margin-top:10px;padding:10px;background:var(--paper2);border-radius:6px;font-size:.84rem;line-height:1.4">
+          👑 <b>Aplicación propiedad de Juan</b><br>
+          Marcador privado administrado y supervisado por Juan.
+        </div>
+      </div>
+      <div class="card" style="margin-bottom:12px">
         <div class="cfg-row">
           <div><div class="cfg-title">Sonido de campana</div><div class="cfg-desc">Reproducir sonido al cerrar mano</div></div>
           <label class="switch"><input type="checkbox" ${cfg.soundEnabled !== false ? 'checked' : ''} onchange="cfg.soundEnabled=this.checked;save()"><span class="slider"></span></label>
@@ -986,12 +1240,13 @@ function openAdminSettings(tabName) {
           <label class="switch"><input type="checkbox" ${cfg.vibrateEnabled !== false ? 'checked' : ''} onchange="cfg.vibrateEnabled=this.checked;save()"><span class="slider"></span></label>
         </div>
       </div>
-      <div class="card" style="background:var(--paper2)"><p class="muted" style="margin:0;font-size:.84rem">👑 La gestión de la mesa, apuestas y control remoto de jugadores está reservada para el Administrador (${esc(cfg.adminName || 'Juan')}).</p></div>
-      <button class="btn block" style="margin-top:14px" onclick="closeModal()">Cerrar</button>`);
+      <button class="btn ghost block" style="margin-bottom:8px" onclick="promptAdminPin()">👑 ¿Eres Juan? Iniciar sesión como Administrador</button>
+      <button class="btn block" onclick="closeModal()">Cerrar</button>`);
   }
 
   // Vista completa de Juan (Administrador)
   const tabs = [
+    ['auth', '🛡️ Acceso'],
     ['room', '🎮 Mesa'],
     ['game', '🎲 Partida'],
     ['pot', '💰 Apuestas'],
@@ -1000,7 +1255,75 @@ function openAdminSettings(tabName) {
   ];
 
   let body = '';
-  if (adminCurrentTab === 'game') {
+  if (adminCurrentTab === 'auth') {
+    const guests = cfg.authorizedGuests || [];
+    body = `
+      <label>Estado Maestro de la Aplicación</label>
+      <div class="card" style="margin-bottom:12px">
+        <div class="cfg-row">
+          <div>
+            <div class="cfg-title">🔒 Cerrar app a todos los invitados</div>
+            <div class="cfg-desc">Modo Solo Juan: ningún amigo podrá usar la aplicación</div>
+          </div>
+          <label class="switch"><input type="checkbox" ${cfg.masterAppLock ? 'checked' : ''} onchange="toggleMasterLock(this.checked)"><span class="slider"></span></label>
+        </div>
+        <div class="cfg-row">
+          <div>
+            <div class="cfg-title">🛡️ Exigir pase de invitación</div>
+            <div class="cfg-desc">Nadie puede usar la app sin un enlace generado por ti</div>
+          </div>
+          <label class="switch"><input type="checkbox" ${cfg.requireInvite !== false ? 'checked' : ''} onchange="toggleRequireInvite(this.checked)"><span class="slider"></span></label>
+        </div>
+      </div>
+
+      <label>Crear invitación para un amigo</label>
+      <div class="card" style="margin-bottom:12px">
+        <div class="row" style="gap:6px">
+          <input id="new-guest-name" placeholder="Nombre (ej: Miguel, Carlos...)" style="margin:0">
+          <button class="btn sm" style="white-space:nowrap" onclick="createGuestInvite()">＋ Crear Pase</button>
+        </div>
+      </div>
+
+      <label>Amigos e Invitados (${guests.length})</label>
+      ${guests.length === 0 ? `<div class="card empty" style="padding:16px"><p style="margin:0">No has añadido amigos todavía. Escribe un nombre arriba para crearle su pase de invitado.</p></div>` : `
+        <div style="margin-bottom:12px">
+          ${guests.map(g => `
+            <div class="card" style="padding:10px 12px;margin-bottom:8px">
+              <div class="row between" style="margin-bottom:6px">
+                <div>
+                  <b>${esc(g.name)}</b>
+                  <span class="tag" style="margin-left:6px;font-weight:700;color:${g.status === 'blocked' ? 'var(--accent)' : 'var(--ok)'}">
+                    ${g.status === 'blocked' ? '🔴 BLOQUEADO' : '🟢 ACTIVO'}
+                  </span>
+                  <div class="muted" style="font-size:.76rem">Pase: <code>${esc(g.pass)}</code></div>
+                </div>
+                <div class="row" style="gap:4px">
+                  ${g.status === 'blocked'
+                    ? `<button class="btn sm" onclick="setGuestStatus('${g.id}','allowed')">✅ Permitir</button>`
+                    : `<button class="btn danger sm" onclick="setGuestStatus('${g.id}','blocked')">⛔ Bloquear</button>`}
+                  <button class="btn ghost sm" onclick="shareGuestInvite('${g.id}')">📲 Enlace</button>
+                  <button class="btn ghost sm" style="color:var(--accent)" onclick="deleteGuest('${g.id}')">✕</button>
+                </div>
+              </div>
+            </div>`).join('')}
+        </div>
+      `}
+
+      <label>Tu PIN Maestro de Administrador</label>
+      <div class="card" style="margin-bottom:12px">
+        <div class="row between" style="gap:8px">
+          <div>
+            <div class="cfg-title">PIN secreto de Juan</div>
+            <div class="cfg-desc">Para identificarte como Administrador en cualquier móvil</div>
+          </div>
+          <input id="cfg-admin-pin" type="text" inputmode="numeric" value="${esc(cfg.adminPin || '1234')}" style="width:90px;text-align:center;font-weight:700;letter-spacing:2px" onchange="setAdminPin(this.value)">
+        </div>
+      </div>
+
+      <button class="btn ghost block" style="margin-bottom:8px" onclick="broadcastAuthPolicy();toast('⚡ Permisos sincronizados en directo con todos los móviles')">⚡ Sincronizar permisos en directo ahora</button>
+      <button class="btn ghost block" style="font-size:.82rem" onclick="testAsGuest()">👁️ Probar qué ve un invitado en mi móvil</button>
+    `;
+  } else if (adminCurrentTab === 'game') {
     if (!G) {
       body = `<div class="card empty" style="text-align:center;padding:24px"><p>No hay partida en juego.</p><span class="muted" style="font-size:.85rem">Aquí podrás cambiar límite, reenganches, puntos de cada jugador, repartidor… en plena partida.</span></div>`;
     } else {
@@ -1314,6 +1637,96 @@ function remoteKickPlayer(targetName) {
   }
 }
 
+function toggleMasterLock(val) {
+  S.adminConfig.masterAppLock = !!val;
+  save();
+  broadcastAuthPolicy();
+  toast(val ? '🔒 Aplicación cerrada a todos los invitados' : '🔓 Aplicación abierta a invitados autorizados');
+  openAdminSettings('auth');
+}
+
+function toggleRequireInvite(val) {
+  S.adminConfig.requireInvite = !!val;
+  save();
+  broadcastAuthPolicy();
+  openAdminSettings('auth');
+}
+
+function setAdminPin(val) {
+  const p = (val || '').trim() || '1234';
+  S.adminConfig.adminPin = p;
+  save();
+  toast('PIN de Administrador actualizado: ' + p);
+}
+
+function createGuestInvite() {
+  const input = $('#new-guest-name');
+  const name = (input.value || '').trim();
+  if (!name) return toast('Escribe el nombre de tu amigo');
+  if (!S.adminConfig.authorizedGuests) S.adminConfig.authorizedGuests = [];
+  
+  let g = S.adminConfig.authorizedGuests.find(x => x.name.trim().toLowerCase() === name.toLowerCase());
+  if (!g) {
+    const pass = 'p' + Math.random().toString(36).substring(2, 7);
+    g = { id: 'g_' + uid(), name, pass, status: 'allowed', addedAt: Date.now() };
+    S.adminConfig.authorizedGuests.unshift(g);
+    save();
+  }
+  input.value = '';
+  broadcastAuthPolicy();
+  openAdminSettings('auth');
+  shareGuestInvite(g.id);
+}
+
+function shareGuestInvite(guestId) {
+  const g = (S.adminConfig.authorizedGuests || []).find(x => x.id === guestId);
+  if (!g) return;
+  const url = `${location.origin}${location.pathname}?guest=${encodeURIComponent(g.name)}&pass=${encodeURIComponent(g.pass)}`;
+  const waMsg = `🃏 ¡Hola ${g.name}! Aquí tienes tu acceso exclusivo como invitado al Marcador de Chinchón de Juan:\n${url}`;
+  modal(`<h2>📲 Enlace de ${esc(g.name)}</h2>
+    <p class="muted">Tu amigo abrirá este enlace y entrará como invitado autorizado bajo tu administración:</p>
+    <input readonly value="${esc(url)}" style="margin-bottom:12px;font-size:.82rem" onclick="this.select()">
+    <div class="row" style="margin-bottom:8px">
+      <button class="btn block" onclick="copyInviteText('${esc(url)}')">📋 Copiar enlace</button>
+      <a class="btn block" style="text-align:center;text-decoration:none;background:#25D366;color:#fff;border-color:#25D366" href="https://api.whatsapp.com/send?text=${encodeURIComponent(waMsg)}" target="_blank">💬 WhatsApp</a>
+    </div>
+    <button class="btn ghost block" onclick="openAdminSettings('auth')">Volver</button>`);
+}
+
+function copyInviteText(text) {
+  (navigator.clipboard ? navigator.clipboard.writeText(text) : Promise.reject())
+    .then(() => toast('Enlace copiado al portapapeles'), () => toast('No se pudo copiar'));
+}
+
+function setGuestStatus(guestId, status) {
+  const g = (S.adminConfig.authorizedGuests || []).find(x => x.id === guestId);
+  if (!g) return;
+  g.status = status;
+  save();
+  broadcastAuthPolicy();
+  toast(status === 'blocked' ? `⛔ ${g.name} ha sido BLOQUEADO` : `✅ ${g.name} ha sido PERMITIDO`);
+  openAdminSettings('auth');
+}
+
+function deleteGuest(guestId) {
+  const idx = (S.adminConfig.authorizedGuests || []).findIndex(x => x.id === guestId);
+  if (idx === -1) return;
+  const name = S.adminConfig.authorizedGuests[idx].name;
+  S.adminConfig.authorizedGuests.splice(idx, 1);
+  save();
+  broadcastAuthPolicy();
+  toast(`Invitado ${name} eliminado`);
+  openAdminSettings('auth');
+}
+
+function testAsGuest() {
+  localStorage.setItem('chinchon_role', 'guest');
+  closeModal();
+  toast('👤 Ahora estás viendo la app como Invitado');
+  render();
+  checkAccessControl();
+}
+
 // ---------- GRUPOS ----------
 function viewGroups() {
   return `<button id="btn-new-group" class="btn block" onclick="openGroupForm()">Nuevo grupo</button><h2>Tus grupos</h2>
@@ -1397,15 +1810,16 @@ function showGame(id) {
 // Dos vistas: "Nuestras" (editables, una a una) y "Oficiales" (referencia fija).
 let rulesView = 'ours';
 function viewRules() {
+  const canEdit = isAdmin();
   const seg = `<div class="seg"><button class="${rulesView === 'ours' ? 'on' : ''}" onclick="rulesView='ours';render()">Nuestras normas</button>
     <button class="${rulesView === 'off' ? 'on' : ''}" onclick="rulesView='off';render()">Oficiales</button></div>`;
   if (rulesView === 'off') return seg + `<p class="muted" style="margin:4px 0 14px">Reglamento clásico del chinchón. Solo lectura.</p>
     ${OFFICIAL_RULES.map(([t, x], i) => ruleItem(i, t, x, false)).join('')}
-    <button class="btn ghost block" style="margin-top:10px" onclick="resetRules()">Usar las oficiales como nuestras</button>`;
+    ${canEdit ? '<button class="btn ghost block" style="margin-top:10px" onclick="resetRules()">Usar las oficiales como nuestras</button>' : ''}`;
   const L = S.rulesList;
-  return seg + `<p class="muted" style="margin:4px 0 14px">Toca una norma para cambiarla.</p>
-    ${L.length ? L.map((r, i) => ruleItem(i, r.title, r.text, true)).join('') : '<div class="empty">No hay normas todavía</div>'}
-    <button id="btn-add-rule" class="btn block" style="margin-top:10px" onclick="editRule(-1)">Añadir norma</button>`;
+  return seg + `<p class="muted" style="margin:4px 0 14px">${canEdit ? 'Toca una norma para cambiarla.' : 'Normas de la casa fijadas por el Administrador (Juan).'}</p>
+    ${L.length ? L.map((r, i) => ruleItem(i, r.title, r.text, canEdit)).join('') : '<div class="empty">No hay normas todavía</div>'}
+    ${canEdit ? '<button id="btn-add-rule" class="btn block" style="margin-top:10px" onclick="editRule(-1)">Añadir norma</button>' : ''}`;
 }
 function ruleItem(i, title, text, editable) {
   return `<div class="rule" ${editable ? `onclick="editRule(${i})"` : ''}>
@@ -1414,6 +1828,7 @@ function ruleItem(i, title, text, editable) {
     <div class="rule-x">${esc(text)}</div></div>`;
 }
 function editRule(i) {
+  if (!isAdmin()) return toast('Solo Juan (Administrador) puede modificar normas');
   const r = S.rulesList[i] || { title: '', text: '' }; const L = S.rulesList.length;
   modal(`<h2>${i < 0 ? 'Nueva norma' : ordinal(i) + ' norma'}</h2>
     <label>Título</label><input id="r-title" value="${esc(r.title)}" placeholder="Ej: El reenganche">
@@ -1426,14 +1841,16 @@ function editRule(i) {
     <button id="btn-save-rule" class="btn block" onclick="saveRule(${i})">Guardar</button></div>`);
 }
 function saveRule(i) {
+  if (!isAdmin()) return toast('Solo Juan puede modificar normas');
   const title = $('#r-title').value.trim(), text = $('#r-text').value.trim();
   if (!title && !text) return toast('Escribe algo');
   if (i < 0) S.rulesList.push({ title, text }); else S.rulesList[i] = { title, text };
   save(); closeModal(); render(); toast('Norma guardada');
 }
-function moveRule(i, d) { const L = S.rulesList; [L[i], L[i + d]] = [L[i + d], L[i]]; save(); render(); editRule(i + d); }
-function delRule(i) { S.rulesList.splice(i, 1); save(); closeModal(); render(); toast('Norma borrada'); }
+function moveRule(i, d) { if (!isAdmin()) return; const L = S.rulesList; [L[i], L[i + d]] = [L[i + d], L[i]]; save(); render(); editRule(i + d); }
+function delRule(i) { if (!isAdmin()) return; S.rulesList.splice(i, 1); save(); closeModal(); render(); toast('Norma borrada'); }
 function resetRules() {
+  if (!isAdmin()) return toast('Solo Juan puede restablecer las normas');
   modal(`<h2>¿Sustituir vuestras normas?</h2><p class="muted">Se cambiarán por las oficiales. Lo que hayas escrito se perderá.</p>
     <div class="row"><button class="btn ghost block" onclick="closeModal()">Cancelar</button>
     <button class="btn block" onclick="S.rulesList=officialCopy();save();rulesView='ours';closeModal();render()">Sustituir</button></div>`);
@@ -1449,8 +1866,12 @@ async function requestWakeLock() {
   }
 }
 
+checkAuthParams();
 render();
 checkRoomParam();
+initMqtt(currentRoomCode || 'auth_global');
+updateRolePill();
+checkAccessControl();
 requestWakeLock();
 applyTheme();
 if (S && S.adminConfig && S.adminConfig.openMessageEnabled && S.adminConfig.openMessageText) {
