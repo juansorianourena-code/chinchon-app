@@ -1,5 +1,5 @@
 // ===== Chinchón – Marcador =====
-const APP_VERSION = '1.9.0';
+const APP_VERSION = '1.10.0';
 const KEY = 'chinchon-data-v1';
 const OFFICIAL_RULES = [
   ['La baraja', 'Se juega con baraja española de 40 cartas (sin ochos ni nueves). Pueden jugar de 2 a 6 jugadores.'],
@@ -80,7 +80,22 @@ function load() {
 function save() { localStorage.setItem(KEY, JSON.stringify(S)); }
 function toast(msg, ms = 2200) { const t = $('#toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove('show'), ms); }
 function modal(html) { const m = $('#modal'); m.innerHTML = `<div class="card">${html}</div>`; m.classList.remove('hidden'); }
-function closeModal() { $('#modal').classList.add('hidden'); }
+function closeModal() {
+  $('#modal').classList.add('hidden');
+  if (window._afterModal) {
+    const fn = window._afterModal;
+    window._afterModal = null;
+    fn();
+  }
+}
+function showOpenMessage() {
+  toast('SOIS UNOS CABRONES', 4500);
+  modal(`<div style="text-align:center;padding:12px 6px">
+    <div style="font-size:3rem;margin-bottom:8px">🃏</div>
+    <h2 style="font-size:1.6rem;margin:0 0 16px;text-transform:uppercase;letter-spacing:1px;color:var(--accent);border:0">SOIS UNOS CABRONES</h2>
+    <button class="btn block" style="font-size:1.05rem;padding:12px" onclick="closeModal()">Entrar</button>
+  </div>`);
+}
 $('#modal').addEventListener('click', e => { if (e.target.id === 'modal') closeModal(); });
 
 document.querySelectorAll('.tabbar button').forEach(b => b.onclick = () => { tab = b.dataset.tab; vibrate(); render(); });
@@ -703,7 +718,7 @@ function checkRoomParam() {
     isHost = false;
     currentRoomCode = r;
     initMqtt(r, () => {
-      promptJoinIdentity(r);
+      window._afterModal = () => promptJoinIdentity(r);
     });
   }
 }
@@ -1391,6 +1406,7 @@ render();
 checkRoomParam();
 requestWakeLock();
 applyTheme();
+showOpenMessage();
 $('#version').textContent = 'v' + APP_VERSION + ' ↻';
 // Botón discreto: tocar la versión fuerza una recarga limpia (borra cachés, no borra datos)
 $('#version').onclick = () => modal(`<h2>Recargar la app</h2><p class="muted">Descarga de nuevo la última versión. Tus grupos, historial y normas no se borran.</p>
