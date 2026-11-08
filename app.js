@@ -1,5 +1,5 @@
 // ===== Chinchón – Marcador =====
-const APP_VERSION = '1.17.2';
+const APP_VERSION = '1.17.3';
 const KEY = 'chinchon-data-v1';
 const OFFICIAL_RULES = [
   ['La baraja', 'Se juega con baraja española de 40 cartas (sin ochos ni nueves). Pueden jugar de 2 a 6 jugadores.'],
@@ -27,6 +27,28 @@ const vibrate = (ms = 15) => {
   if (typeof S !== 'undefined' && S && S.adminConfig && S.adminConfig.vibrateEnabled === false) return;
   if (navigator.vibrate) navigator.vibrate(ms);
 };
+
+function getCookie(name) {
+  try {
+    const v = document.cookie.match('(^|;) ?' + name + '=([^;]*)(;|$)');
+    return v ? decodeURIComponent(v[2]) : null;
+  } catch(e) { return null; }
+}
+
+function setPersistentIdentity(name, role = 'guest', pass = '') {
+  name = (name || '').trim();
+  if (!name) return;
+  myPlayerName = name;
+  localStorage.setItem('chinchon_player_name', name);
+  localStorage.setItem('chinchon_role', role);
+  if (pass) localStorage.setItem('chinchon_guest_pass', pass);
+  try {
+    const expireDate = new Date(Date.now() + 365*24*3600*1000).toUTCString();
+    document.cookie = `chinchon_user=${encodeURIComponent(name)}; expires=${expireDate}; path=/; SameSite=Lax`;
+    if (pass) document.cookie = `chinchon_pass=${encodeURIComponent(pass)}; expires=${expireDate}; path=/; SameSite=Lax`;
+    if (role) document.cookie = `chinchon_role=${encodeURIComponent(role)}; expires=${expireDate}; path=/; SameSite=Lax`;
+  } catch(e) {}
+}
 
 const DEFAULT_ADMIN_CONFIG = {
   adminName: 'Juan',
@@ -75,6 +97,8 @@ function load() {
     if (d) {
       if (!d.adminId) d.adminId = uid();
       d.adminConfig = Object.assign({}, DEFAULT_ADMIN_CONFIG, d.adminConfig || {});
+      const savedPin = (typeof localStorage !== 'undefined') ? localStorage.getItem('chinchon_admin_pin') : null;
+      if (savedPin) d.adminConfig.adminPin = savedPin;
       if (!Array.isArray(d.adminConfig.authorizedGuests)) d.adminConfig.authorizedGuests = [];
       if (!d.adminConfig.playerAliases) d.adminConfig.playerAliases = { 'anita': 'Ana' };
       if (!d.adminConfig.playerAliases['anita']) d.adminConfig.playerAliases['anita'] = 'Ana';
@@ -191,6 +215,14 @@ function checkAccessControl() {
     return true;
   }
 
+  // Si no tenemos nombre en localStorage, intentar recuperarlo de cookies (habitual al abrir PWA desde la pantalla de inicio en iOS)
+  if (!myPlayerName || myPlayerName === 'Invitado') {
+    const cookieUser = getCookie('chinchon_user');
+    if (cookieUser) {
+      setPersistentIdentity(cookieUser, getCookie('chinchon_role') || 'guest', getCookie('chinchon_pass') || '');
+    }
+  }
+
   const remoteAuth = getCachedRemoteAuth();
   const masterLock = (remoteAuth && remoteAuth.masterAppLock !== undefined)
     ? remoteAuth.masterAppLock
@@ -226,23 +258,71 @@ function checkAccessControl() {
     return false;
   }
 
-  // 3. Exigir pase de invitación (no aplica si vienen por enlace de sala de la partida)
-  const reqInvite = (remoteAuth && remoteAuth.requireInvite !== undefined)
-    ? remoteAuth.requireInvite
-    : (S && S.adminConfig && S.adminConfig.requireInvite !== false);
-
-  if (!currentRoomCode && reqInvite && !myPass && (!myName || myName === 'invitado')) {
-    showLockScreen({
-      icon: '🔐',
-      title: 'Aplicación Privada de Juan',
-      text: 'Para poder utilizar este marcador necesitas un enlace de invitación personal enviado por Juan.'
-    });
+  // 3. Si se abre desde la Pantalla de Inicio o navegador sin identidad:
+  // En vez de bloquear con pantalla de error o exigir PIN de Juan, mostrar selector amigable
+  if (!currentRoomCode && (!myName || myName === 'invitado')) {
+    showHomeScreenWelcome();
     return false;
   }
 
   lockEl.classList.add('hidden');
   updateRolePill();
   return true;
+}
+
+function showHomeScreenWelcome() {
+  const lockEl = $('#lockscreen');
+  if (!lockEl) return;
+
+  const friends = getAllKnownFriends();
+  const guestList = (S && S.adminConfig && S.adminConfig.authorizedGuests) || [];
+  const knownNames = Array.from(new Set([
+    ...friends.map(f => f.name),
+    ...guestList.map(g => g.name)
+  ])).filter(n => n && n.toLowerCase() !== 'juan' && n.toLowerCase() !== 'invitado');
+
+  lockEl.innerHTML = `
+    <div class="lock-icon" style="font-size:3.2rem;margin-bottom:6px">🃏</div>
+    <h2 class="lock-title" style="margin:0 0 6px">Chinchón · Marcador</h2>
+    <p class="lock-text" style="margin-bottom:14px">Aplicación de <b>Juan</b>.<br>Elige tu nombre para entrar a jugar:</p>
+    
+    <div style="width:100%;max-width:320px;margin:0 auto 12px;display:flex;flex-direction:column;gap:8px">
+      ${knownNames.length ? knownNames.map(n => `
+        <button class="btn block" style="font-size:1.05rem;padding:12px;display:flex;justify-content:space-between;align-items:center;background:var(--paper);color:var(--ink);border:1.5px solid var(--ink)" onclick="selectGuestFromWelcome('${esc(n)}')">
+          <span>👉 Soy <b>${esc(n)}</b></span>
+          <span style="font-weight:700">Entrar ›</span>
+        </button>
+      `).join('') : ''}
+    </div>
+
+    <div class="card" style="width:100%;max-width:320px;margin:0 auto 14px;padding:12px;text-align:left;background:var(--paper2)">
+      <label style="margin:0 0 6px;font-size:.78rem;font-weight:700">O escribe tu nombre si eres un nuevo amigo:</label>
+      <div class="row" style="gap:6px">
+        <input id="welcome-input-name" placeholder="Tu nombre..." style="margin:0;font-size:1rem;padding:8px" onkeydown="if(event.key==='Enter')selectGuestFromWelcome(this.value)">
+        <button class="btn sm" style="white-space:nowrap;padding:8px 12px" onclick="selectGuestFromWelcome(document.getElementById('welcome-input-name').value)">Entrar</button>
+      </div>
+    </div>
+
+    <div style="width:100%;max-width:320px;margin:0 auto;padding-top:12px;border-top:1px solid var(--line)">
+      <button class="btn ghost block sm" onclick="promptAdminPin()">👑 ¿Eres Juan? Iniciar sesión como Administrador</button>
+    </div>
+    <div class="lock-foot" style="margin-top:16px">👑 Propiedad de Juan · Chinchón Online</div>
+  `;
+  lockEl.classList.remove('hidden');
+}
+
+function selectGuestFromWelcome(name) {
+  name = (name || '').trim();
+  if (!name) return toast('Por favor, escribe tu nombre');
+  if (name.toLowerCase() === 'juan') {
+    return promptAdminPin();
+  }
+  setPersistentIdentity(name, 'guest', 'p_' + uid());
+  const lockEl = $('#lockscreen');
+  if (lockEl) lockEl.classList.add('hidden');
+  toast(`👋 ¡Hola ${name}! Bienvenido a la app de Juan`);
+  render();
+  broadcastPresence();
 }
 
 function showLockScreen({ title, text, icon }) {
@@ -258,7 +338,7 @@ function showLockScreen({ title, text, icon }) {
       <div class="card" style="margin-top:8px;padding:12px;text-align:left;background:var(--paper2);border:1px solid var(--line)">
         <label style="margin:0 0 6px;font-size:.78rem;font-weight:700">¿Eres Juan? Introduce tu PIN de Administrador:</label>
         <div class="row" style="gap:6px">
-          <input id="lock-pin-input" type="password" inputmode="numeric" placeholder="1234" style="text-align:center;font-size:1.15rem;letter-spacing:4px;padding:8px" onkeydown="if(event.key==='Enter')submitLockPin()">
+          <input id="lock-pin-input" type="password" inputmode="numeric" placeholder="****" style="text-align:center;font-size:1.15rem;letter-spacing:4px;padding:8px" onkeydown="if(event.key==='Enter')submitLockPin()">
           <button class="btn sm" style="white-space:nowrap;padding:9px 14px" onclick="submitLockPin()">Entrar</button>
         </div>
       </div>
@@ -272,8 +352,8 @@ function showLockScreen({ title, text, icon }) {
 function submitLockPin() {
   const el = $('#lock-pin-input') || $('#adm-pin-input');
   const pin = (el ? el.value : '').trim();
-  const correct = (S && S.adminConfig && S.adminConfig.adminPin) || '1234';
-  if (pin === correct || pin === '1234') {
+  const configuredPin = (S && S.adminConfig && S.adminConfig.adminPin) || localStorage.getItem('chinchon_admin_pin') || '1234';
+  if (pin === configuredPin) {
     localStorage.setItem('chinchon_role', 'admin');
     localStorage.setItem('chinchon_admin_verified', 'true');
     localStorage.setItem('chinchon_player_name', 'Juan');
@@ -282,7 +362,7 @@ function submitLockPin() {
     const lockEl = $('#lockscreen');
     if (lockEl) lockEl.classList.add('hidden');
     closeModal();
-    toast('👑 ¡Bienvenido Juan! Modo Administrador reactivado');
+    toast('👑 ¡Bienvenido Juan! Modo Administrador activado');
     render();
     openAdminSettings('auth');
   } else {
@@ -320,7 +400,7 @@ function promptAdminPin() {
   }
   modal(`<h2>👑 Iniciar sesión como Administrador</h2>
     <p class="muted">Introduce tu PIN de Administrador (Juan) para desbloquear el control total en este dispositivo:</p>
-    <input id="adm-pin-input" type="password" inputmode="numeric" placeholder="1234" style="font-size:1.4rem;letter-spacing:6px;text-align:center;margin:12px 0" onkeydown="if(event.key==='Enter')submitLockPin()">
+    <input id="adm-pin-input" type="password" inputmode="numeric" placeholder="****" style="font-size:1.4rem;letter-spacing:6px;text-align:center;margin:12px 0" onkeydown="if(event.key==='Enter')submitLockPin()">
     <div class="row">
       <button class="btn ghost block" onclick="closeModal()">Cancelar</button>
       <button class="btn block" onclick="submitLockPin()">Entrar</button>
@@ -341,27 +421,30 @@ function checkAuthParams() {
     // Rescate de emergencia para Juan si entra con ?admin, ?juan o ?reset
     if (urlP.has('admin') || hashP.has('admin') || urlP.has('juan') || hashP.has('juan') || urlP.has('reset') || hashP.has('reset')) {
       localStorage.setItem('chinchon_role', 'admin');
+      localStorage.setItem('chinchon_admin_verified', 'true');
+      localStorage.setItem('chinchon_player_name', 'Juan');
+      myPlayerName = 'Juan';
       window.history.replaceState({}, document.title, location.pathname);
       toast('👑 Modo Administrador restablecido');
       return;
     }
 
-    const gName = (urlP.get('guest') || hashP.get('guest') || '').trim();
+    const gName = (urlP.get('guest') || hashP.get('guest') || urlP.get('friend') || hashP.get('friend') || '').trim();
     const gPass = (urlP.get('pass') || hashP.get('pass') || '').trim();
     const hasAppInvite = urlP.has('invite') || hashP.has('invite') || urlP.has('inv') || hashP.has('inv') || urlP.has('guest') || hashP.has('guest');
 
     // SI VIENE POR ENLACE DE INVITADO, FORZAR MODO INVITADO DE INMEDIATO
     if (hasAppInvite || gName || gPass) {
-      localStorage.setItem('chinchon_role', 'guest');
-      if (gPass) localStorage.setItem('chinchon_guest_pass', gPass);
       if (gName) {
-        localStorage.setItem('chinchon_player_name', gName);
-        myPlayerName = gName;
+        setPersistentIdentity(gName, 'guest', gPass || ('p_' + uid()));
+        try { window.location.hash = `guest=${encodeURIComponent(gName)}&pass=${encodeURIComponent(gPass || '')}`; } catch(e) {}
+      } else {
+        setPersistentIdentity('Invitado', 'guest', gPass || ('p_' + uid()));
       }
     }
 
     // Si viene por invitación para pertenecer a la aplicación (no a una sala concreta)
-    if (!urlP.get('room') && !hashP.get('room') && hasAppInvite) {
+    if (!urlP.get('room') && !hashP.get('room') && hasAppInvite && !gName) {
       if (S.game) {
         if (S.game.winner) {
           if (!S.games) S.games = [];
@@ -376,23 +459,17 @@ function checkAuthParams() {
         window._identityChosen = false;
         save();
       }
-      window.history.replaceState({}, document.title, location.pathname);
       setTimeout(() => promptAppOnboarding(gName), 200);
       return;
     }
 
     if (gName) {
-      localStorage.setItem('chinchon_role', 'guest');
-      localStorage.setItem('chinchon_player_name', gName);
-      myPlayerName = gName;
-      if (gPass) localStorage.setItem('chinchon_guest_pass', gPass);
-      const cleanUrl = location.pathname + (urlP.get('room') ? '?room=' + urlP.get('room') : '');
-      window.history.replaceState({}, document.title, cleanUrl);
       toast(`👋 ¡Hola ${gName}! Invitado a la app de Juan.`);
     }
 
     const pin = (urlP.get('admin_pin') || hashP.get('admin_pin') || urlP.get('pin') || hashP.get('pin') || '').trim();
-    if (pin && (pin === ((S && S.adminConfig && S.adminConfig.adminPin) || '1234') || pin === '1234')) {
+    const configuredPin = (S && S.adminConfig && S.adminConfig.adminPin) || localStorage.getItem('chinchon_admin_pin') || '1234';
+    if (pin && pin === configuredPin) {
       localStorage.setItem('chinchon_role', 'admin');
       localStorage.setItem('chinchon_admin_verified', 'true');
       localStorage.setItem('chinchon_player_name', 'Juan');
@@ -504,7 +581,7 @@ function render() {
 // ---------- JUGAR ----------
 let selGroup = null;
 function viewPlay() {
-  const guestBanner = !isAdmin() ? `<div style="background:var(--paper2);border:1px dashed var(--accent);border-radius:6px;padding:8px 12px;margin-bottom:12px;display:flex;justify-content:space-between;align-items:center;font-size:.85rem"><span>👤 <b>Modo Invitado</b> · Propiedad de Juan</span><button class="btn sm" style="padding:5px 10px;font-size:.8rem" onclick="promptAdminPin()">👑 Volver a Admin</button></div>` : '';
+  const guestBanner = !isAdmin() ? `<div style="background:var(--paper2);border:1px dashed var(--line);border-radius:6px;padding:8px 12px;margin-bottom:12px;display:flex;justify-content:space-between;align-items:center;font-size:.85rem"><span>👤 <b>${esc(myPlayerName || 'Invitado')}</b> · Marcador de Juan</span><span class="muted" style="font-size:.78rem">Invitado</span></div>` : '';
   const liveTablesCard = `<div id="live-tables-section">${renderLiveTablesCard()}</div>`;
 
   const joinByCodeCard = `
@@ -522,7 +599,7 @@ function viewPlay() {
 
   const st = S.settings;
   if (!S.groups.length) return guestBanner + liveTablesCard + joinByCodeCard + `<div class="hero"><img src="icon-192.png" alt="Chinchón"><h2>¡Bienvenido!</h2>
-    <p class="muted">Primero crea un grupo con los jugadores o únete arriba con código.</p><button id="go-groups" class="btn block" onclick="tab='groups';render();openGroupForm()">Crear grupo</button></div>`;
+    <p class="muted">${isAdmin() ? 'Primero crea un grupo con los jugadores o únete arriba con código.' : 'Únete a una mesa arriba o pide a Juan que inicie una partida.'}</p>${isAdmin() ? '<button id="go-groups" class="btn block" onclick="tab=\'groups\';render();openGroupForm()">Crear grupo</button>' : ''}</div>`;
   if (!selGroup || !S.groups.find(g => g.id === selGroup)) selGroup = S.groups[0].id;
   return guestBanner + liveTablesCard + joinByCodeCard + `<div class="hero" style="padding:14px"><img src="icon-192.png" alt="Chinchón"></div>
   <h2>¿Quién juega?</h2>
@@ -1058,8 +1135,8 @@ function confetti() {
 
 // ===== SINCRONIZACIÓN EN TIEMPO REAL & GESTOR DE CONEXIÓN ROBUSTO =====
 const MQTT_BROKERS = [
-  { host: 'broker.emqx.io', port: 8084, path: '/mqtt' },
-  { host: 'broker.hivemq.com', port: 8884, path: '/mqtt' }
+  { host: 'broker.hivemq.com', port: 8884, path: '/mqtt' },
+  { host: 'broker.emqx.io', port: 8084, path: '/mqtt' }
 ];
 let _currentBrokerIdx = 0;
 let _mqttStatus = 'disconnected'; // 'connected' | 'connecting' | 'disconnected'
@@ -1159,7 +1236,9 @@ function initMqtt(roomCode, onConnect) {
     mqttClient.onConnectionLost = (responseObject) => {
       _mqttStatus = 'disconnected';
       updateConnectionIndicator();
-      _currentBrokerIdx = (_currentBrokerIdx + 1) % MQTT_BROKERS.length;
+      if (_reconnectAttempts > 4 && _reconnectAttempts % 2 === 0) {
+        _currentBrokerIdx = (_currentBrokerIdx + 1) % MQTT_BROKERS.length;
+      }
       scheduleMqttReconnect();
     };
 
@@ -1194,7 +1273,9 @@ function initMqtt(roomCode, onConnect) {
       onFailure: (err) => {
         _mqttStatus = 'disconnected';
         updateConnectionIndicator();
-        _currentBrokerIdx = (_currentBrokerIdx + 1) % MQTT_BROKERS.length;
+        if (_reconnectAttempts > 4 && _reconnectAttempts % 2 === 0) {
+          _currentBrokerIdx = (_currentBrokerIdx + 1) % MQTT_BROKERS.length;
+        }
         scheduleMqttReconnect();
       }
     });
@@ -1206,7 +1287,9 @@ function initMqtt(roomCode, onConnect) {
 }
 
 function sendMqtt(data) {
-  data.from = CLIENT_ID;
+  data.clientId = CLIENT_ID;
+  if (!data.from) data.from = (isAdmin() ? 'Juan' : (myPlayerName || 'Invitado'));
+  data.senderName = data.from;
   const dest = `chinchon/v1/${currentRoomCode || 'auth_global'}`;
   if (!mqttClient || !mqttClient.isConnected || !mqttClient.isConnected()) {
     _mqttOutbox.push({ dest, data });
@@ -1225,7 +1308,9 @@ function sendMqtt(data) {
 }
 
 function sendGlobalMqtt(data) {
-  data.from = CLIENT_ID;
+  data.clientId = CLIENT_ID;
+  if (!data.from) data.from = (isAdmin() ? 'Juan' : (myPlayerName || 'Invitado'));
+  data.senderName = data.from;
   const dest = 'chinchon/v1/auth_global';
   if (!mqttClient || !mqttClient.isConnected || !mqttClient.isConnected()) {
     _mqttOutbox.push({ dest, data });
@@ -1240,6 +1325,23 @@ function sendGlobalMqtt(data) {
   } catch(e) {
     _mqttOutbox.push({ dest, data });
     ensureMqttConnected();
+  }
+}
+
+function notifyChatMessage(sender, text) {
+  if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+    try {
+      if (navigator.serviceWorker && navigator.serviceWorker.controller) {
+        navigator.serviceWorker.controller.postMessage({
+          type: 'SHOW_NOTIFICATION',
+          title: `💬 ${sender}`,
+          body: text,
+          icon: 'icon-192.png'
+        });
+      } else {
+        new Notification(`💬 ${sender}`, { body: text, icon: 'icon-192.png' });
+      }
+    } catch(e) {}
   }
 }
 
@@ -1468,7 +1570,10 @@ function openFriendChatModal(friendName) {
             </div>
           </div>
         </div>
-        <button class="btn ghost sm" onclick="window._currentChatWith=null;closeModal()">✕</button>
+        <div class="row" style="gap:4px">
+          ${typeof Notification !== 'undefined' && Notification.permission !== 'granted' ? '<button class="btn sm ghost" style="font-size:.72rem;padding:3px 7px" onclick="requestNotificationPermission()">🔔 Avisos</button>' : ''}
+          <button class="btn ghost sm" onclick="window._currentChatWith=null;closeModal()">✕</button>
+        </div>
       </div>
 
       <div id="chat-msgs-box" class="chat-messages">
@@ -1504,6 +1609,16 @@ function openFriendChatModal(friendName) {
   }, 100);
 }
 
+function requestNotificationPermission() {
+  if (typeof Notification !== 'undefined') {
+    Notification.requestPermission().then(p => {
+      if (p === 'granted') toast('🔔 Notificaciones del móvil activadas');
+      else toast('Notificaciones desactivadas en tu navegador');
+      if (window._currentChatWith) openFriendChatModal(window._currentChatWith);
+    });
+  }
+}
+
 function quickSendChat(text) {
   const inp = document.getElementById('chat-input');
   if (inp) inp.value = text;
@@ -1518,10 +1633,11 @@ function sendFriendChatMessage(friendName) {
   const text = (inp.value || '').trim();
   if (!text) return;
 
-  const myName = myPlayerName || (isAdmin() ? 'Juan' : 'Amigo');
+  const myName = (isAdmin() ? 'Juan' : (myPlayerName || 'Invitado'));
   const msgObj = {
     id: uid(),
     from: myName,
+    senderName: myName,
     target: friendName,
     text: text,
     time: Date.now()
@@ -1786,7 +1902,8 @@ function broadcastTableAlive() {
 
 function handleMqttMsg(d) {
   if (!d || !d.type) return;
-  if (d.from && d.from === CLIENT_ID) return; // ignorar el eco de mis propios mensajes
+  if (d.clientId && d.clientId === CLIENT_ID) return; // ignorar el eco de mis propios mensajes
+  if (d.from === CLIENT_ID) return;
   if (d.type === 'card_action' || d.type.startsWith('card_')) {
     if (window.handleCardTableMsg) window.handleCardTableMsg(d);
     return;
@@ -2078,19 +2195,21 @@ function handleMqttMsg(d) {
       }
     }
   } else if (d.type === 'direct_chat') {
+    const sender = d.senderName || d.fromName || (d.from && d.from !== d.clientId ? d.from : 'Amigo');
     const myName = (myPlayerName || (isAdmin() ? 'Juan' : '')).trim().toLowerCase();
     const canonMyName = getCanonicalPlayerName(myName).toLowerCase();
     const isTarget = (d.target && (d.target.trim().toLowerCase() === myName || d.target.trim().toLowerCase() === canonMyName)) ||
                      (Array.isArray(d.targets) && d.targets.some(t => t.trim().toLowerCase() === myName || t.trim().toLowerCase() === canonMyName));
     if (isTarget) {
-      saveChatMessage(d.from, { ...d, me: false });
+      saveChatMessage(sender, { ...d, from: sender, me: false });
       playChatSound();
       vibrate([100, 40, 100]);
-      if (window._currentChatWith && getCanonicalPlayerName(window._currentChatWith).toLowerCase() === getCanonicalPlayerName(d.from).toLowerCase()) {
+      if (window._currentChatWith && getCanonicalPlayerName(window._currentChatWith).toLowerCase() === getCanonicalPlayerName(sender).toLowerCase()) {
         openFriendChatModal(window._currentChatWith);
       } else {
-        showIncomingChatBanner(d.from, d.text, false);
+        showIncomingChatBanner(sender, d.text, false);
       }
+      notifyChatMessage(sender, d.text);
     }
   } else if (d.type === 'room_chat') {
     if (currentRoomCode && d.roomCode === currentRoomCode) {
@@ -2656,7 +2775,10 @@ function openAdminSettings(tabName) {
             <div class="cfg-title">PIN secreto de Juan</div>
             <div class="cfg-desc">Para identificarte como Administrador en cualquier móvil</div>
           </div>
-          <input id="cfg-admin-pin" type="text" inputmode="numeric" value="${esc(cfg.adminPin || '1234')}" style="width:90px;text-align:center;font-weight:700;letter-spacing:2px" onchange="setAdminPin(this.value)">
+          <div class="row" style="gap:6px">
+            <input id="cfg-admin-pin" type="text" inputmode="numeric" value="${esc(cfg.adminPin || '1234')}" style="width:85px;text-align:center;font-weight:700;letter-spacing:2px;font-size:1.1rem" oninput="setAdminPin(this.value)">
+            <button class="btn sm" title="Guardar PIN" onclick="setAdminPin(document.getElementById('cfg-admin-pin').value)">💾</button>
+          </div>
         </div>
       </div>
 
@@ -2893,7 +3015,7 @@ function openAdminSettings(tabName) {
     </div>
     ${body}
     <div class="row" style="margin-top:16px">
-      <button class="btn block" onclick="closeModal();render()">Guardar y cerrar</button>
+      <button class="btn block" onclick="saveAndCloseAdminSettings()">Guardar y cerrar</button>
     </div>
   `);
 }
@@ -3073,14 +3195,41 @@ function toggleRequireInvite(val) {
 }
 
 function setAdminPin(val) {
-  const p = (val || '').trim() || '1234';
+  const p = (val || '').trim();
+  if (!p) return;
+  if (!S.adminConfig) S.adminConfig = Object.assign({}, DEFAULT_ADMIN_CONFIG);
   S.adminConfig.adminPin = p;
+  localStorage.setItem('chinchon_admin_pin', p);
   save();
-  toast('PIN de Administrador actualizado: ' + p);
+  toast('🔑 PIN de Administrador guardado: ' + p);
+}
+
+function saveAndCloseAdminSettings() {
+  const pinInput = $('#cfg-admin-pin');
+  if (pinInput && pinInput.value.trim()) {
+    setAdminPin(pinInput.value.trim());
+  }
+  const openMsgInput = $('#cfg-open-msg');
+  if (openMsgInput && S.adminConfig) {
+    S.adminConfig.openMessageText = openMsgInput.value.trim();
+  }
+  const pingHeaderInput = $('#cfg-ping-header');
+  if (pingHeaderInput && S.adminConfig) {
+    S.adminConfig.customPingHeader = pingHeaderInput.value.trim();
+  }
+  const sigInput = $('#cfg-signature');
+  if (sigInput && S.adminConfig) {
+    S.adminConfig.customSignature = sigInput.value.trim();
+  }
+  save();
+  broadcastAuthPolicy();
+  closeModal();
+  render();
+  toast('✅ Ajustes de Juan guardados correctamente');
 }
 
 function copyGeneralInviteLink() {
-  const url = `${location.origin}${location.pathname}?invite=juan`;
+  const url = `${location.origin}${location.pathname}#invite=juan`;
   const wa = `🃏 ¡Hola! Te invito a tener el Marcador de Chinchón de Juan en tu móvil. Entra aquí para activar tu cuenta:\n${url}`;
   modal(`<h2>🔗 Enlace de Invitación a la App</h2>
     <p class="muted">Tus amigos abrirán este enlace, pondrán su nombre y activarán su cuenta de invitado en tu aplicación:</p>
@@ -3114,10 +3263,10 @@ function createGuestInvite() {
 function shareGuestInvite(guestId) {
   const g = (S.adminConfig.authorizedGuests || []).find(x => x.id === guestId);
   if (!g) return;
-  const url = `${location.origin}${location.pathname}?guest=${encodeURIComponent(g.name)}&pass=${encodeURIComponent(g.pass)}`;
-  const waMsg = `🃏 ¡Hola ${g.name}! Aquí tienes tu acceso exclusivo como invitado al Marcador de Chinchón de Juan:\n${url}`;
+  const url = `${location.origin}${location.pathname}#guest=${encodeURIComponent(g.name)}&pass=${encodeURIComponent(g.pass)}`;
+  const waMsg = `🃏 ¡Hola ${g.name}! Aquí tienes tu acceso exclusivo al Marcador de Chinchón de Juan (puedes añadirlo a tu pantalla de inicio):\n${url}`;
   modal(`<h2>📲 Enlace de ${esc(g.name)}</h2>
-    <p class="muted">Tu amigo abrirá este enlace, confirmará su nombre y activará su cuenta en tu aplicación:</p>
+    <p class="muted">Tu amigo abrirá este enlace y podrá usar la app directamente o añadirla a la pantalla de inicio:</p>
     <input readonly value="${esc(url)}" style="margin-bottom:12px;font-size:.82rem" onclick="this.select()">
     <div class="row" style="margin-bottom:8px">
       <button class="btn block" onclick="copyInviteText('${esc(url)}')">📋 Copiar enlace</button>
@@ -3584,7 +3733,7 @@ function viewGroups() {
 
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
       <h2 style="margin:0">📋 Grupos de Juego</h2>
-      <button id="btn-new-group" class="btn sm" onclick="openGroupForm()">＋ Nuevo grupo</button>
+      ${isAdmin() ? '<button id="btn-new-group" class="btn sm" onclick="openGroupForm()">＋ Nuevo grupo</button>' : ''}
     </div>
 
     ${S.groups.length ? S.groups.map(g => {
@@ -3593,10 +3742,12 @@ function viewGroups() {
         <div class="card">
           <div class="row between">
             <b>${esc(g.name)}</b>
-            <div class="row" style="gap:4px">
-              <button class="btn ghost sm" onclick="openGroupForm('${g.id}')">Editar</button>
-              <button class="btn danger sm" onclick="delGroup('${g.id}')">Borrar</button>
-            </div>
+            ${isAdmin() ? `
+              <div class="row" style="gap:4px">
+                <button class="btn ghost sm" onclick="openGroupForm('${g.id}')">Editar</button>
+                <button class="btn danger sm" onclick="delGroup('${g.id}')">Borrar</button>
+              </div>
+            ` : ''}
           </div>
           <div class="muted" style="font-size:.8rem;margin:4px 0 8px">${g.players.map(esc).join(' · ')}</div>
           ${g.players.map(p => `<div class="rank"><span>${esc(p)}</span><span class="muted">${wins[p] || 0} vic</span></div>`).join('')}
@@ -3606,6 +3757,7 @@ function viewGroups() {
   `;
 }
 function openGroupForm(id) {
+  if (!isAdmin()) return toast('Solo el Administrador (Juan) puede crear o editar grupos');
   const g = S.groups.find(x => x.id === id) || { name: '', players: ['', '', ''] };
   window._gp = [...g.players];
   const draw = () => modal(`<h2>${id ? 'Editar' : 'Nuevo'} grupo</h2>
@@ -3621,14 +3773,16 @@ function openGroupForm(id) {
   draw();
 }
 function saveGroup(id) {
+  if (!isAdmin()) return toast('Solo el Administrador (Juan) puede modificar grupos');
   const name = $('#g-name').value.trim() || 'Grupo';
   const players = _gp.map(s => s.trim()).filter(Boolean);
   if (players.length < 2) return toast('Pon al menos 2 jugadores');
   if (id) Object.assign(S.groups.find(g => g.id === id), { name, players });
   else { const g = { id: uid(), name, players }; S.groups.push(g); selGroup = g.id; }
-  save(); closeModal(); render(); toast('Grupo guardado ');
+  save(); closeModal(); render(); toast('Grupo guardado');
 }
 function delGroup(id) {
+  if (!isAdmin()) return toast('Solo el Administrador (Juan) puede borrar grupos');
   modal(`<h2>¿Borrar grupo?</h2><p class="muted">El historial de partidas se mantiene.</p><div class="row">
     <button class="btn ghost block" onclick="closeModal()">No</button><button class="btn danger block" onclick="S.groups=S.groups.filter(g=>g.id!=='${id}');save();closeModal();render()">Borrar</button></div>`);
 }
@@ -3726,8 +3880,10 @@ function showGame(id) {
       <button class="btn btn-wa block" style="flex:1;font-size:.88rem" onclick="openSendReportModal(S.games.find(x=>x.id==='${id}'))">📲 Enviar / Ping</button>
       <button class="btn ghost block" style="flex:1;font-size:.88rem" onclick="syncSingleGameToMobiles('${id}')">⚡ Enviar a móviles</button>
     </div>
-    <div class="row" style="margin-top:8px"><button class="btn danger block" onclick="S.games=S.games.filter(x=>x.id!=='${id}');save();closeModal();render()">Borrar</button>
-    <button class="btn block" onclick="closeModal()">Cerrar</button></div>`);
+    <div class="row" style="margin-top:8px">
+      ${isAdmin() ? `<button class="btn danger block" onclick="S.games=S.games.filter(x=>x.id!=='${id}');save();closeModal();render()">Borrar</button>` : ''}
+      <button class="btn block" onclick="closeModal()">Cerrar</button>
+    </div>`);
 }
 
 // ---------- NORMAS ----------

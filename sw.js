@@ -1,4 +1,4 @@
-const VERSION = '1.17.2';
+const VERSION = '1.17.3';
 const CACHE = 'chinchon-' + VERSION;
 const FILES = ['./', 'index.html', 'style.css', 'cards.js', 'app.js', 'mqttws31.min.js', 'manifest.json', 'icon-192.png', 'icon-512.png', 'apple-touch-icon.png'];
 self.addEventListener('install', e => {
@@ -17,4 +17,31 @@ self.addEventListener('fetch', e => {
     if (r.ok && url.origin === location.origin) { const copy = r.clone(); caches.open(CACHE).then(c => c.put(e.request, copy)); }
     return r;
   }).catch(() => caches.match(e.request, { ignoreSearch: true })));
+});
+
+// Notificaciones del sistema para mensajes y avisos
+self.addEventListener('message', e => {
+  if (e.data && e.data.type === 'SHOW_NOTIFICATION') {
+    self.registration.showNotification(e.data.title || 'Chinchón', {
+      body: e.data.body || '',
+      icon: e.data.icon || 'icon-192.png',
+      badge: 'icon-192.png',
+      vibrate: [200, 100, 200],
+      tag: 'chat-msg',
+      renotify: true,
+      data: e.data.data || {}
+    });
+  }
+});
+
+self.addEventListener('notificationclick', e => {
+  e.notification.close();
+  e.waitUntil(
+    clients.matchAll({ type: 'window', includeUncontrolled: true }).then(windowClients => {
+      for (let client of windowClients) {
+        if ('focus' in client) return client.focus();
+      }
+      if (clients.openWindow) return clients.openWindow('./');
+    })
+  );
 });
