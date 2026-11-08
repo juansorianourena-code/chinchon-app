@@ -1,5 +1,5 @@
 // ===== Chinchón – Marcador =====
-const APP_VERSION = '1.17.0';
+const APP_VERSION = '1.17.1';
 const KEY = 'chinchon-data-v1';
 const OFFICIAL_RULES = [
   ['La baraja', 'Se juega con baraja española de 40 cartas (sin ochos ni nueves). Pueden jugar de 2 a 6 jugadores.'],
@@ -1218,29 +1218,191 @@ function sendGlobalMqtt(data) {
   }
 }
 
-// ===== MENSAJERÍA DIRECTA & CHAT =====
-window._currentChatWith = null;
-window._roomChatMessages = [];
+// ===== SISTEMA DE AUDIO ROBUSTO (MÓVILES, IOS SAFARI & ANDROID) =====
+let _sharedAudioCtx = null;
+let _audioUnlocked = false;
+let _cachedChatWav = null;
+let _cachedBellWav = null;
+
+function createToneWavDataUri(tones, durationSec = 0.35, sampleRate = 22050) {
+  try {
+    const numSamples = Math.floor(sampleRate * durationSec);
+    const dataSize = numSamples * 2;
+    const buffer = new ArrayBuffer(44 + dataSize);
+    const view = new DataView(buffer);
+
+    function writeStr(offset, str) {
+      for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
+    }
+    writeStr(0, 'RIFF');
+    view.setUint32(4, 36 + dataSize, true);
+    writeStr(8, 'WAVE');
+    writeStr(12, 'fmt ');
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true); // PCM
+    view.setUint16(22, 1, true); // Mono
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * 2, true);
+    view.setUint16(32, 2, true);
+    view.setUint16(34, 16, true);
+    writeStr(36, 'data');
+    view.setUint32(40, dataSize, true);
+
+    for (let i = 0; i < numSamples; i++) {
+      const t = i / sampleRate;
+      let s = 0;
+      for (const tone of tones) {
+        if (t >= tone.start && t < tone.end) {
+          const toneT = t - tone.start;
+          const toneDur = tone.end - tone.start;
+          const env = Math.exp(-3.5 * (toneT / toneDur));
+          s += Math.sin(2 * Math.PI * tone.freq * toneT) * env * (tone.vol || 0.6);
+        }
+      }
+      s = Math.max(-1, Math.min(1, s));
+      view.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+    }
+
+    const bytes = new Uint8Array(buffer);
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+    let base64 = '';
+    const len = bytes.byteLength;
+    for (let i = 0; i < len; i += 3) {
+      const b1 = bytes[i];
+      const b2 = i + 1 < len ? bytes[i + 1] : 0;
+      const b3 = i + 2 < len ? bytes[i + 2] : 0;
+      base64 += chars[b1 >> 2];
+      base64 += chars[((b1 & 3) << 4) | (b2 >> 4)];
+      base64 += i + 1 < len ? chars[((b2 & 15) << 2) | (b3 >> 6)] : '=';
+      base64 += i + 2 < len ? chars[b3 & 63] : '=';
+    }
+    return 'data:audio/wav;base64,' + base64;
+  } catch(e) { return null; }
+}
+
+function getSharedAudioContext() {
+  if (!_sharedAudioCtx && (window.AudioContext || window.webkitAudioContext)) {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    _sharedAudioCtx = new AudioCtx();
+  }
+  return _sharedAudioCtx;
+}
+
+function unlockMobileAudio() {
+  const ctx = getSharedAudioContext();
+  if (ctx && ctx.state === 'suspended') {
+    ctx.resume().then(() => { _audioUnlocked = true; }).catch(() => {});
+  } else if (ctx && ctx.state === 'running') {
+    _audioUnlocked = true;
+  }
+  try {
+    if (ctx) {
+      const buf = ctx.createBuffer(1, 1, 22050);
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      src.connect(ctx.destination);
+      src.start(0);
+    }
+  } catch(e) {}
+}
+
+if (typeof document !== 'undefined') {
+  ['touchstart', 'touchend', 'click', 'pointerdown', 'keydown'].forEach(ev => {
+    document.addEventListener(ev, unlockMobileAudio, { passive: true });
+  });
+}
 
 function playChatSound() {
   if (typeof S !== 'undefined' && S && S.adminConfig && S.adminConfig.soundEnabled === false) return;
+  
+  // 1. Web Audio sintetizado
   try {
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
-    const now = ctx.currentTime;
-    [587.33, 880].forEach((freq, i) => {
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.type = 'triangle';
-      osc.frequency.setValueAtTime(freq, now + i * 0.08);
-      gain.gain.setValueAtTime(0.25, now + i * 0.08);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + i * 0.08 + 0.25);
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-      osc.start(now + i * 0.08);
-      osc.stop(now + i * 0.08 + 0.26);
-    });
+    const ctx = getSharedAudioContext();
+    if (ctx) {
+      if (ctx.state === 'suspended') ctx.resume();
+      const now = ctx.currentTime;
+      [659.25, 987.77].forEach((freq, i) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(freq, now + i * 0.08);
+        gain.gain.setValueAtTime(0.4, now + i * 0.08);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + i * 0.08 + 0.28);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(now + i * 0.08);
+        osc.stop(now + i * 0.08 + 0.29);
+      });
+    }
   } catch(e) {}
+
+  // 2. HTML5 Audio (reproduce en segundo plano / iOS Safari)
+  try {
+    if (!_cachedChatWav) {
+      _cachedChatWav = createToneWavDataUri([
+        { freq: 659.25, start: 0, end: 0.16, vol: 0.7 },
+        { freq: 987.77, start: 0.08, end: 0.35, vol: 0.8 }
+      ]);
+    }
+    if (_cachedChatWav) {
+      const a = new Audio(_cachedChatWav);
+      a.volume = 1.0;
+      const p = a.play();
+      if (p && p.catch) p.catch(() => {});
+    }
+  } catch(e) {}
+
+  vibrate([100, 40, 100]);
 }
+
+function ringBellSound() {
+  if (typeof S !== 'undefined' && S && S.adminConfig && S.adminConfig.soundEnabled === false) return;
+
+  // 1. Web Audio sintetizado
+  try {
+    const ctx = getSharedAudioContext();
+    if (ctx) {
+      if (ctx.state === 'suspended') ctx.resume();
+      const now = ctx.currentTime;
+      [523.25, 659.25, 783.99, 1046.50].forEach((freq, i) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(freq, now + i * 0.05);
+        gain.gain.setValueAtTime(0.45, now + i * 0.05);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + i * 0.05 + 1.1);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(now + i * 0.05);
+        osc.stop(now + i * 0.05 + 1.1);
+      });
+    }
+  } catch(e) {}
+
+  // 2. HTML5 Audio sintetizado
+  try {
+    if (!_cachedBellWav) {
+      _cachedBellWav = createToneWavDataUri([
+        { freq: 523.25, start: 0, end: 0.8, vol: 0.6 },
+        { freq: 659.25, start: 0.05, end: 0.85, vol: 0.6 },
+        { freq: 783.99, start: 0.10, end: 0.9, vol: 0.6 },
+        { freq: 1046.50, start: 0.15, end: 1.0, vol: 0.7 }
+      ], 1.0);
+    }
+    if (_cachedBellWav) {
+      const a = new Audio(_cachedBellWav);
+      a.volume = 1.0;
+      const p = a.play();
+      if (p && p.catch) p.catch(() => {});
+    }
+  } catch(e) {}
+
+  vibrate([80, 50, 100]);
+}
+
+// ===== MENSAJERÍA DIRECTA & CHAT =====
+window._currentChatWith = null;
+window._roomChatMessages = [];
 
 function getChatStorageKey(friendName) {
   const canon = getCanonicalPlayerName(friendName).toLowerCase().replace(/[^a-z0-9]/g, '_');
@@ -1959,27 +2121,6 @@ function handleMqttMsg(d) {
   }
 }
 
-// Sonido y aviso de campana de cierre
-function ringBellSound() {
-  if (typeof S !== 'undefined' && S && S.adminConfig && S.adminConfig.soundEnabled === false) return;
-  try {
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
-    const now = ctx.currentTime;
-    [523.25, 659.25, 783.99, 1046.50].forEach((freq, i) => {
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.type = 'sine';
-      osc.frequency.setValueAtTime(freq, now + i * 0.05);
-      gain.gain.setValueAtTime(0.35, now + i * 0.05);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + i * 0.05 + 1.2);
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-      osc.start(now + i * 0.05);
-      osc.stop(now + i * 0.05 + 1.2);
-    });
-  } catch(e) {}
-}
-
 function triggerCloseBell() {
   ringBellSound();
   vibrate([80, 40, 120]);
@@ -2409,6 +2550,9 @@ function openAdminSettings(tabName) {
           <div><div class="cfg-title">Vibración</div><div class="cfg-desc">Vibrar con avisos y botones</div></div>
           <label class="switch"><input type="checkbox" ${cfg.vibrateEnabled !== false ? 'checked' : ''} onchange="cfg.vibrateEnabled=this.checked;save()"><span class="slider"></span></label>
         </div>
+        <div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--line)">
+          <button class="btn ghost sm block" style="font-size:.8rem" onclick="unlockMobileAudio();playChatSound();toast('🔊 Probando sonido de notificación')">🔊 Probar sonido de notificación</button>
+        </div>
       </div>
       <button class="btn ghost block" style="margin-bottom:8px" onclick="promptAdminPin()">👑 ¿Eres Juan? Iniciar sesión como Administrador</button>
       <button class="btn block" onclick="closeModal()">Cerrar</button>`);
@@ -2696,6 +2840,10 @@ function openAdminSettings(tabName) {
             <div class="cfg-desc">Respuesta táctil al pulsar botones y avisos</div>
           </div>
           <label class="switch"><input type="checkbox" ${cfg.vibrateEnabled !== false ? 'checked' : ''} onchange="cfg.vibrateEnabled=this.checked;save()"><span class="slider"></span></label>
+        </div>
+        <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--line);display:flex;gap:6px">
+          <button class="btn ghost sm block" style="flex:1;font-size:.8rem" onclick="unlockMobileAudio();playChatSound();toast('🔊 Probando sonido de mensaje/chat')">🔊 Probar mensaje</button>
+          <button class="btn ghost sm block" style="flex:1;font-size:.8rem" onclick="unlockMobileAudio();ringBellSound();toast('🔔 Probando campana')">🔔 Probar campana</button>
         </div>
       </div>
 
