@@ -1,5 +1,5 @@
 // ===== Chinchón – Marcador =====
-const APP_VERSION = '1.17.1';
+const APP_VERSION = '1.17.2';
 const KEY = 'chinchon-data-v1';
 const OFFICIAL_RULES = [
   ['La baraja', 'Se juega con baraja española de 40 cartas (sin ochos ni nueves). Pueden jugar de 2 a 6 jugadores.'],
@@ -135,14 +135,22 @@ function closeModal() {
 
 // ===== SISTEMA DE AUTORIZACIÓN & IDENTIDAD DE JUAN =====
 function isAdmin() {
+  const pName = (myPlayerName || localStorage.getItem('chinchon_player_name') || '').trim().toLowerCase();
+  const hasGuestPass = !!localStorage.getItem('chinchon_guest_pass');
   const r = localStorage.getItem('chinchon_role');
-  if (r === 'admin') return true;
-  if (r === 'guest') return false;
-  // Dispositivo maestro original de Juan
-  if (S && S.adminConfig && S.adminConfig.adminName === 'Juan') {
-    localStorage.setItem('chinchon_role', 'admin');
-    return true;
+
+  const isVerified = localStorage.getItem('chinchon_admin_verified') === 'true';
+
+  // Si este dispositivo tiene pase de invitado o está registrado con nombre de amigo (Ana, Miguel, etc.), NUNCA es admin
+  if (hasGuestPass || (pName && pName !== 'juan')) {
+    if (r === 'admin') localStorage.setItem('chinchon_role', 'guest');
+    return false;
   }
+
+  if (r === 'guest') return false;
+  if (r === 'admin' && (isVerified || pName === 'juan')) return true;
+
+  // Por defecto, cualquier dispositivo nuevo es INVITADO, nunca administrador
   return false;
 }
 
@@ -267,6 +275,10 @@ function submitLockPin() {
   const correct = (S && S.adminConfig && S.adminConfig.adminPin) || '1234';
   if (pin === correct || pin === '1234') {
     localStorage.setItem('chinchon_role', 'admin');
+    localStorage.setItem('chinchon_admin_verified', 'true');
+    localStorage.setItem('chinchon_player_name', 'Juan');
+    localStorage.removeItem('chinchon_guest_pass');
+    myPlayerName = 'Juan';
     const lockEl = $('#lockscreen');
     if (lockEl) lockEl.classList.add('hidden');
     closeModal();
@@ -338,9 +350,19 @@ function checkAuthParams() {
     const gPass = (urlP.get('pass') || hashP.get('pass') || '').trim();
     const hasAppInvite = urlP.has('invite') || hashP.has('invite') || urlP.has('inv') || hashP.has('inv') || urlP.has('guest') || hashP.has('guest');
 
+    // SI VIENE POR ENLACE DE INVITADO, FORZAR MODO INVITADO DE INMEDIATO
+    if (hasAppInvite || gName || gPass) {
+      localStorage.setItem('chinchon_role', 'guest');
+      if (gPass) localStorage.setItem('chinchon_guest_pass', gPass);
+      if (gName) {
+        localStorage.setItem('chinchon_player_name', gName);
+        myPlayerName = gName;
+      }
+    }
+
     // Si viene por invitación para pertenecer a la aplicación (no a una sala concreta)
     if (!urlP.get('room') && !hashP.get('room') && hasAppInvite) {
-      if (!isAdmin() && S.game) {
+      if (S.game) {
         if (S.game.winner) {
           if (!S.games) S.games = [];
           if (!S.games.find(g => g.id === S.game.id)) S.games.unshift(S.game);
@@ -354,7 +376,6 @@ function checkAuthParams() {
         window._identityChosen = false;
         save();
       }
-      if (gPass) localStorage.setItem('chinchon_guest_pass', gPass);
       window.history.replaceState({}, document.title, location.pathname);
       setTimeout(() => promptAppOnboarding(gName), 200);
       return;
@@ -373,8 +394,12 @@ function checkAuthParams() {
     const pin = (urlP.get('admin_pin') || hashP.get('admin_pin') || urlP.get('pin') || hashP.get('pin') || '').trim();
     if (pin && (pin === ((S && S.adminConfig && S.adminConfig.adminPin) || '1234') || pin === '1234')) {
       localStorage.setItem('chinchon_role', 'admin');
+      localStorage.setItem('chinchon_admin_verified', 'true');
+      localStorage.setItem('chinchon_player_name', 'Juan');
+      localStorage.removeItem('chinchon_guest_pass');
+      myPlayerName = 'Juan';
       window.history.replaceState({}, document.title, location.pathname);
-      toast('👑 Acceso de Administrador concedido');
+      toast('👑 Acceso de Administrador Juan concedido');
     }
   } catch(e) {}
 }
