@@ -405,7 +405,7 @@ function handleCardDraw(source) {
   T.hands[curPlayerName].push(card);
   T.phase = 'discard';
   T.drawnCard = card;
-  window._selectedHandCardId = card.id; // preseleccionar la robada para facilidad
+  window._selectedHandCardId = null; // el jugador elige qué tirar (o usa 💡)
   playCardAudio('draw');
   vibrate(25);
 
@@ -470,6 +470,7 @@ function handleCardDiscard(closeMode = false) {
   save();
   broadcastCardTable('discard', { player: curPlayerName, card: discardedCard });
   render();
+  if (S.game.mode === 'online' && !window._soloPracticeMode && typeof pushToTargets === 'function') pushToTargets({ target: nextPlayer });
 
   // Si le toca a un bot o jugador no conectado en modo práctica, activar IA
   checkAndTriggerBot();
@@ -760,36 +761,6 @@ function runBotDiscard(botName) {
 }
 
 // ==========================================
-// 7. ORDENAR CARTAS DE LA MANO
-// ==========================================
-function sortHandCards(by = 'suit') {
-  const T = getCardTable();
-  if (!T) return;
-  const myName = (isAdmin() ? 'Juan' : myPlayerName) || S.game.players[0].name;
-  const hand = T.hands[myName];
-  if (!hand || !hand.length) return;
-
-  if (by === 'suit') {
-    hand.sort((a, b) => {
-      if (a.isJoker) return 1;
-      if (b.isJoker) return -1;
-      if (a.suit !== b.suit) return a.suit.localeCompare(b.suit);
-      return NUM_INDEX[a.num] - NUM_INDEX[b.num];
-    });
-  } else if (by === 'num') {
-    hand.sort((a, b) => {
-      if (a.isJoker) return 1;
-      if (b.isJoker) return -1;
-      if (NUM_INDEX[a.num] !== NUM_INDEX[b.num]) return NUM_INDEX[a.num] - NUM_INDEX[b.num];
-      return a.suit.localeCompare(b.suit);
-    });
-  }
-  playCardAudio('draw');
-  save();
-  render();
-}
-
-// ==========================================
 // 8. SINCRONIZACIÓN MQTT DE LA MESA
 // ==========================================
 function broadcastCardTable(action, payload = {}) {
@@ -817,6 +788,17 @@ window.handleCardTableMsg = function(d) {
     }
     save();
     render();
+    try {
+      const T2 = S.game.cardTable;
+      const key = T2 && (T2.turn + ':' + T2.phase + ':' + (S.game.rounds ? S.game.rounds.length : 0) + ':' + (T2.discard ? T2.discard.length : 0));
+      if (T2 && T2.phase === 'draw' && isMyCardTurn() && window._lastTurnKey !== key) {
+        window._lastTurnKey = key;
+        toast('🟢 ¡Te toca jugar!', 2500);
+        vibrate([60, 40, 60]);
+        if (typeof playChatSound === 'function') playChatSound();
+        if (document.hidden && typeof notifyChatMessage === 'function') notifyChatMessage('Chinchón', '¡Te toca jugar!');
+      }
+    } catch (e) {}
     if (d.action === 'close') {
       playCardAudio('close');
       vibrate([80, 50, 100]);
@@ -827,183 +809,385 @@ window.handleCardTableMsg = function(d) {
 };
 
 // ==========================================
-// 9. RENDERIZADO VISUAL DEL TAPETE Y CARTAS
+// 9. BARAJA ESPAÑOLA ESTILO FOURNIER (SVG) Y TAPETE
 // ==========================================
-function renderCardSVG(card, isBack = false, isSelected = false, isDrawn = false) {
-  if (isBack) {
-    return `<div class="p-card card-back"></div>`;
+const FC_PAL = {
+  oros:    { main: '#c9971c', alt: '#b3261e', ink: '#7a5200', text: '#8a5a00', light: '#fbf1cf' },
+  copas:   { main: '#c8322b', alt: '#e8b923', ink: '#6e130f', text: '#b3261e', light: '#fbe3df' },
+  espadas: { main: '#2b5d9b', alt: '#e8b923', ink: '#1d3557', text: '#1d4e89', light: '#dfe9f5' },
+  bastos:  { main: '#3f7f3a', alt: '#b3261e', ink: '#1f4a1b', text: '#2f6b2b', light: '#e1f0dc' }
+};
+
+function ensureCardDefs() {
+  try {
+    if (document.getElementById('fc-defs')) return;
+    const holder = document.createElement('div');
+    holder.id = 'fc-defs';
+    holder.setAttribute('style', 'position:absolute;width:0;height:0;overflow:hidden');
+    holder.innerHTML = `<svg width="0" height="0" xmlns="http://www.w3.org/2000/svg"><defs>
+      <radialGradient id="gOro" cx="40%" cy="35%" r="70%"><stop offset="0" stop-color="#fff3b0"/><stop offset="1" stop-color="#e0a81c"/></radialGradient>
+      <pattern id="fcbk" width="12" height="12" patternUnits="userSpaceOnUse"><path d="M6 0 L12 6 L6 12 L0 6 Z" fill="none" stroke="#e8b923" stroke-width="1"/></pattern>
+      <symbol id="fp-oros" viewBox="0 0 40 40" overflow="visible">
+        <circle cx="20" cy="20" r="18" fill="url(#gOro)" stroke="#6b4a00" stroke-width="2"/>
+        <circle cx="20" cy="20" r="13" fill="none" stroke="#6b4a00" stroke-width="1.4"/>
+        <circle cx="20" cy="20" r="7" fill="#f3cf5a" stroke="#6b4a00" stroke-width="1.4"/>
+        <circle cx="20" cy="20" r="2.2" fill="#6b4a00"/>
+        <g fill="#6b4a00"><circle cx="35.5" cy="20" r="1.2"/><circle cx="30.96" cy="30.96" r="1.2"/><circle cx="20" cy="35.5" r="1.2"/><circle cx="9.04" cy="30.96" r="1.2"/><circle cx="4.5" cy="20" r="1.2"/><circle cx="9.04" cy="9.04" r="1.2"/><circle cx="20" cy="4.5" r="1.2"/><circle cx="30.96" cy="9.04" r="1.2"/></g>
+      </symbol>
+      <symbol id="fp-copas" viewBox="0 0 40 40" overflow="visible">
+        <path d="M7 5 H33 C33 19 27 25 20 25 C13 25 7 19 7 5 Z" fill="#c8322b" stroke="#6e130f" stroke-width="2" stroke-linejoin="round"/>
+        <path d="M7 5 H33" stroke="#e8b923" stroke-width="3"/>
+        <path d="M12 9 C12 16 15 20 19 21" fill="none" stroke="#f4a09b" stroke-width="1.6" stroke-linecap="round"/>
+        <rect x="18" y="25" width="4" height="8" fill="#e8b923" stroke="#6e130f" stroke-width="1.4"/>
+        <ellipse cx="20" cy="35" rx="9" ry="3" fill="#e8b923" stroke="#6e130f" stroke-width="1.6"/>
+      </symbol>
+      <symbol id="fp-espadas" viewBox="0 0 40 40" overflow="visible">
+        <path d="M20 1 C27 9 26 20 23.5 27 H16.5 C14 20 13 9 20 1 Z" fill="#dfe6ec" stroke="#1d3557" stroke-width="1.8" stroke-linejoin="round"/>
+        <path d="M20 4 V26" stroke="#8aa0b4" stroke-width="1.2"/>
+        <path d="M8 28 Q20 24 32 28 L31 31 H9 Z" fill="#2b5d9b" stroke="#1d3557" stroke-width="1.6" stroke-linejoin="round"/>
+        <rect x="18" y="31" width="4" height="6" fill="#7a4a1d" stroke="#1d3557" stroke-width="1.2"/>
+        <circle cx="20" cy="38" r="2.2" fill="#e8b923" stroke="#1d3557" stroke-width="1"/>
+      </symbol>
+      <symbol id="fp-bastos" viewBox="0 0 40 40" overflow="visible">
+        <g transform="rotate(18 20 20)">
+          <path d="M14 8 C14 2 26 2 26 8 L25 30 C25 37 15 37 15 30 Z" fill="#4c9a43" stroke="#1f4a1b" stroke-width="2" stroke-linejoin="round"/>
+          <circle cx="14.5" cy="14" r="3.4" fill="#3b7d34" stroke="#1f4a1b" stroke-width="1.4"/>
+          <circle cx="25.5" cy="21" r="3.4" fill="#3b7d34" stroke="#1f4a1b" stroke-width="1.4"/>
+          <circle cx="14.8" cy="27" r="3" fill="#3b7d34" stroke="#1f4a1b" stroke-width="1.4"/>
+          <path d="M19 6 V31" stroke="#8ccf82" stroke-width="1.4" stroke-linecap="round"/>
+        </g>
+      </symbol>
+    </defs></svg>`;
+    document.body.appendChild(holder);
+  } catch (e) {}
+}
+
+const FC_PIPS = {
+  1: { s: 62, p: [[50, 75]] },
+  2: { s: 38, p: [[50, 42], [50, 108]] },
+  3: { s: 34, p: [[50, 38], [50, 75], [50, 112]] },
+  4: { s: 34, p: [[33, 44], [67, 44], [33, 106], [67, 106]] },
+  5: { s: 32, p: [[33, 44], [67, 44], [50, 75], [33, 106], [67, 106]] },
+  6: { s: 30, p: [[33, 38], [67, 38], [33, 75], [67, 75], [33, 112], [67, 112]] },
+  7: { s: 29, p: [[33, 38], [67, 38], [50, 56], [33, 75], [67, 75], [33, 112], [67, 112]] }
+};
+
+function fcCourt(card) {
+  const pal = FC_PAL[card.suit];
+  const sym = `#fp-${card.suit}`;
+  const frame = `<rect x="17" y="24" width="66" height="102" rx="4" fill="${pal.light}" stroke="${pal.ink}" stroke-width="1.4"/>
+    <rect x="17" y="24" width="66" height="10" fill="${pal.main}"/><rect x="17" y="116" width="66" height="10" fill="${pal.alt}"/>`;
+  const skin = '#f1c9a0';
+  if (card.num === 10) { // Sota
+    return frame + `
+      <rect x="40" y="96" width="8" height="20" fill="#2b2118"/><rect x="52" y="96" width="8" height="20" fill="#2b2118"/>
+      <path d="M36 62 L64 62 L68 100 L32 100 Z" fill="${pal.main}" stroke="${pal.ink}" stroke-width="1.4" stroke-linejoin="round"/>
+      <path d="M35 80 H66" stroke="${pal.alt}" stroke-width="5"/>
+      <use href="${sym}" x="63" y="64" width="18" height="18"/>
+      <circle cx="50" cy="52" r="9" fill="${skin}" stroke="${pal.ink}" stroke-width="1.3"/>
+      <path d="M40 50 Q50 33 60 50 Z" fill="${pal.alt}" stroke="${pal.ink}" stroke-width="1.3"/>
+      <path d="M58 43 Q71 36 67 27" stroke="#b3261e" stroke-width="3" fill="none" stroke-linecap="round"/>`;
   }
+  if (card.num === 11) { // Caballo
+    return frame + `
+      <rect x="29" y="106" width="5" height="12" fill="#e9e2d0" stroke="${pal.ink}" stroke-width="1"/><rect x="38" y="106" width="5" height="12" fill="#e9e2d0" stroke="${pal.ink}" stroke-width="1"/>
+      <rect x="52" y="106" width="5" height="12" fill="#e9e2d0" stroke="${pal.ink}" stroke-width="1"/><rect x="61" y="106" width="5" height="12" fill="#e9e2d0" stroke="${pal.ink}" stroke-width="1"/>
+      <path d="M24 96 Q18 108 24 112" stroke="#6b4a2b" stroke-width="3.5" fill="none" stroke-linecap="round"/>
+      <ellipse cx="46" cy="98" rx="24" ry="13" fill="#f3efe6" stroke="${pal.ink}" stroke-width="1.4"/>
+      <path d="M62 92 L71 70 L82 73 L80 85 L72 87 L68 102 Z" fill="#f3efe6" stroke="${pal.ink}" stroke-width="1.4" stroke-linejoin="round"/>
+      <path d="M71 70 Q64 76 66 90" stroke="#6b4a2b" stroke-width="3" fill="none"/>
+      <rect x="34" y="92" width="24" height="8" fill="${pal.alt}" stroke="${pal.ink}" stroke-width="1"/>
+      <rect x="40" y="66" width="16" height="26" rx="3" fill="${pal.main}" stroke="${pal.ink}" stroke-width="1.3"/>
+      <circle cx="48" cy="57" r="7.5" fill="${skin}" stroke="${pal.ink}" stroke-width="1.2"/>
+      <path d="M40 55 Q48 40 56 55 Z" fill="${pal.alt}" stroke="${pal.ink}" stroke-width="1.2"/>
+      <use href="${sym}" x="18" y="60" width="16" height="16"/>`;
+  }
+  // Rey
+  return frame + `
+    <path d="M30 72 L70 72 L78 116 L22 116 Z" fill="${pal.main}" stroke="${pal.ink}" stroke-width="1.4" stroke-linejoin="round"/>
+    <path d="M40 72 L60 72 L63 116 L37 116 Z" fill="${pal.alt}" opacity=".85"/>
+    <path d="M34 66 H66 L62 79 H38 Z" fill="#fff" stroke="${pal.ink}" stroke-width="1.2"/>
+    <g fill="#2b2118"><circle cx="42" cy="72" r="1.3"/><circle cx="50" cy="75" r="1.3"/><circle cx="58" cy="72" r="1.3"/></g>
+    <rect x="73" y="58" width="3" height="52" fill="#e8b923" stroke="${pal.ink}" stroke-width=".8"/><circle cx="74.5" cy="56" r="4" fill="#e8b923" stroke="${pal.ink}" stroke-width="1"/>
+    <circle cx="50" cy="54" r="10" fill="${skin}" stroke="${pal.ink}" stroke-width="1.3"/>
+    <path d="M41 56 Q50 76 59 56 Q50 62 41 56 Z" fill="#e9e2d0" stroke="${pal.ink}" stroke-width="1.1"/>
+    <path d="M39 48 L41 33 L46 41 L50 31 L54 41 L59 33 L61 48 Z" fill="#e8b923" stroke="${pal.ink}" stroke-width="1.3" stroke-linejoin="round"/>
+    <use href="${sym}" x="24" y="94" width="18" height="18"/>`;
+}
+
+function fcFace(card) {
+  if (card.isJoker) {
+    return `<rect x="1.5" y="1.5" width="97" height="147" rx="8" fill="#f7f0dc" stroke="#2b2118" stroke-width="2"/>
+      <rect x="8" y="8" width="84" height="134" rx="4" fill="#efe3f7" stroke="#6b2d8a" stroke-width="1.4"/>
+      <path d="M26 66 L38 28 L50 56 L62 28 L74 66 Z" fill="#8e44ad" stroke="#4a1d63" stroke-width="1.6" stroke-linejoin="round"/>
+      <circle cx="38" cy="26" r="4.5" fill="#e8b923" stroke="#4a1d63"/><circle cx="62" cy="26" r="4.5" fill="#e8b923" stroke="#4a1d63"/><circle cx="50" cy="54" r="4" fill="#e8b923" stroke="#4a1d63"/>
+      <circle cx="50" cy="82" r="18" fill="#f1c9a0" stroke="#4a1d63" stroke-width="1.5"/>
+      <circle cx="44" cy="78" r="2.2" fill="#2b2118"/><circle cx="56" cy="78" r="2.2" fill="#2b2118"/>
+      <path d="M42 88 Q50 97 58 88" stroke="#b3261e" stroke-width="2.4" fill="none" stroke-linecap="round"/>
+      <path d="M26 102 L50 118 L74 102 L68 128 H32 Z" fill="#c8322b" stroke="#6e130f" stroke-width="1.4" stroke-linejoin="round"/>
+      <text x="50" y="140" font-size="9.5" font-weight="800" text-anchor="middle" fill="#4a1d63" font-family="Georgia,serif" letter-spacing="1">COMODÍN</text>`;
+  }
+  const pal = FC_PAL[card.suit];
+  const sym = `#fp-${card.suit}`;
+  const n = card.num;
+  let body = '';
+  if (n >= 10) body = fcCourt(card);
+  else {
+    const L = FC_PIPS[n];
+    body = L.p.map(([x, y]) => `<use href="${sym}" x="${x - L.s / 2}" y="${y - L.s / 2}" width="${L.s}" height="${L.s}"/>`).join('');
+  }
+  const idx = `<text x="11" y="19" font-size="15" font-weight="800" text-anchor="middle" fill="${pal.text}" font-family="Georgia,serif">${n}</text>
+    <use href="${sym}" x="4.5" y="21" width="13" height="13"/>`;
+  return `<rect x="1.5" y="1.5" width="97" height="147" rx="8" fill="#f7f0dc" stroke="#2b2118" stroke-width="2"/>
+    <rect x="5" y="5" width="90" height="140" rx="5" fill="none" stroke="${pal.ink}" stroke-width=".6" opacity=".5"/>
+    ${body}${idx}<g transform="rotate(180 50 75)">${idx}</g>`;
+}
+
+function fcBack() {
+  return `<rect x="1.5" y="1.5" width="97" height="147" rx="8" fill="#f7f0dc" stroke="#2b2118" stroke-width="2"/>
+    <rect x="7" y="7" width="86" height="136" rx="4" fill="#1f3b73"/><rect x="7" y="7" width="86" height="136" rx="4" fill="url(#fcbk)"/>
+    <rect x="7" y="7" width="86" height="136" rx="4" fill="none" stroke="#e8b923" stroke-width="1.2"/>
+    <circle cx="50" cy="75" r="19" fill="#f7f0dc" stroke="#e8b923" stroke-width="2"/><use href="#fp-oros" x="37" y="62" width="26" height="26"/>`;
+}
+
+function cardLabel(card) {
   if (!card) return '';
-  const info = SUIT_INFOS[card.suit] || SUIT_INFOS.oros;
-  const isRed = card.suit === 'copas';
-  const isJoker = card.isJoker;
+  if (card.isJoker) return 'el Comodín';
+  return `${(NUM_NAMES[card.num] || card.num)} de ${SUIT_INFOS[card.suit].name}`;
+}
 
-  const numLabel = isJoker ? '★' : NUM_LABELS[card.num];
-  const symbol = info.symbol;
+window.fcTap = function (id) {
+  window._selectedHandCardId = (window._selectedHandCardId === id) ? null : id;
+  playCardAudio('draw');
+  render();
+};
 
-  return `
-    <div class="p-card ${card.suit} ${isSelected ? 'selected' : ''} ${isDrawn ? 'new-draw' : ''}"
-         onclick="window._selectedHandCardId='${card.id}';render();"
-         data-id="${card.id}"
-         style="--suit-color:${info.color};--suit-bg:${info.bg}">
-      <div class="card-corner top-left">
-        <span class="card-num">${numLabel}</span>
-        <span class="card-sym">${symbol}</span>
-      </div>
-      <div class="card-center">
-        <span class="card-large-sym">${symbol}</span>
-        ${isJoker ? '<div class="joker-tag">COMODÍN</div>' : ''}
-      </div>
-      <div class="card-corner bottom-right">
-        <span class="card-num">${numLabel}</span>
-        <span class="card-sym">${symbol}</span>
-      </div>
-    </div>
-  `;
+// opts: { mini, noClick, back }
+function renderCardSVG(card, isBack = false, isSelected = false, isDrawn = false, opts = {}) {
+  ensureCardDefs();
+  const cls = `fc ${opts.mini ? 'mini' : ''} ${isSelected ? 'selected' : ''} ${isDrawn ? 'new-draw' : ''}`;
+  if (isBack) return `<div class="fc ${opts.mini ? 'mini' : ''} fc-back"><svg viewBox="0 0 100 150">${fcBack()}</svg></div>`;
+  if (!card) return '';
+  const click = (opts.mini || opts.noClick) ? '' : `onclick="fcTap('${card.id}')"`;
+  return `<div class="${cls}" ${click} data-id="${card.id}" title="${esc(cardLabel(card))}"><svg viewBox="0 0 100 150">${fcFace(card)}</svg></div>`;
+}
+
+// ---------- Orden de la mano ----------
+window._handMode = 'auto'; // 'auto' (combinaciones agrupadas) | 'suit' | 'num'
+const _suitOrder = { oros: 0, copas: 1, espadas: 2, bastos: 3, comodin: 4 };
+function _cmpSuit(a, b) { if (a.isJoker) return 1; if (b.isJoker) return -1; return (_suitOrder[a.suit] - _suitOrder[b.suit]) || (NUM_INDEX[a.num] - NUM_INDEX[b.num]); }
+function _cmpNum(a, b) { if (a.isJoker) return 1; if (b.isJoker) return -1; return (NUM_INDEX[a.num] - NUM_INDEX[b.num]) || (_suitOrder[a.suit] - _suitOrder[b.suit]); }
+
+function sortHandCards(by) {
+  window._handMode = by || 'auto';
+  playCardAudio('draw');
+  render();
+}
+
+function handGroups(hand, ev) {
+  if (window._handMode === 'suit') return [{ type: 'free', cards: [...hand].sort(_cmpSuit) }];
+  if (window._handMode === 'num') return [{ type: 'free', cards: [...hand].sort(_cmpNum) }];
+  const groups = (ev.melds || []).map(m => ({ type: 'meld', cards: [...m].sort(isValidStraight(m) ? _cmpNum : _cmpSuit) }));
+  const loose = [...(ev.unmelded || [])].sort(_cmpSuit);
+  if (loose.length) groups.push({ type: 'loose', cards: loose });
+  return groups;
+}
+
+// Mejor carta para tirar (menos puntos sueltos; a igualdad, la más alta)
+function bestDiscardChoice(hand) {
+  let best = null;
+  hand.forEach((c, i) => {
+    const rem = hand.filter((_, k) => k !== i);
+    const ev = evaluateHand(rem);
+    const better = !best || ev.unmeldedScore < best.score || (ev.unmeldedScore === best.score && c.val > best.card.val);
+    if (better) best = { card: c, score: ev.unmeldedScore, canClose: ev.canClose, ev };
+  });
+  return best;
+}
+
+function hintDiscard() {
+  const T = getCardTable();
+  if (!T || T.phase !== 'discard') return;
+  const myName = (isAdmin() ? 'Juan' : myPlayerName) || S.game.players[0].name;
+  const hand = T.hands[myName] || [];
+  if (hand.length !== 8) return;
+  const b = bestDiscardChoice(hand);
+  window._selectedHandCardId = b.card.id;
+  toast(`💡 Te sobra ${cardLabel(b.card)}${b.canClose ? ' · ¡y puedes cerrar!' : ''}`);
+  render();
+}
+
+function closeHandSmart() {
+  const T = getCardTable();
+  if (!T || T.phase !== 'discard') return;
+  const myName = (isAdmin() ? 'Juan' : myPlayerName) || S.game.players[0].name;
+  const hand = T.hands[myName] || [];
+  let pick = null;
+  if (window._selectedHandCardId) {
+    const rem = hand.filter(c => c.id !== window._selectedHandCardId);
+    if (evaluateHand(rem).canClose) pick = window._selectedHandCardId;
+  }
+  if (!pick) {
+    const b = bestDiscardChoice(hand);
+    if (b && b.canClose) pick = b.card.id;
+  }
+  if (!pick) return toast('⚠️ Todavía no puedes cerrar: te sobran demasiados puntos (máximo 5)');
+  window._selectedHandCardId = pick;
+  handleCardDiscard(true);
+}
+
+function discardOnPile() {
+  if (!window._selectedHandCardId) return toast('Toca primero la carta de tu mano que quieres tirar');
+  handleCardDiscard(false);
+}
+
+function renderOppCards(n) {
+  const k = Math.min(n, 9);
+  let s = '';
+  for (let i = 0; i < k; i++) s += `<span class="opp-back" style="left:${i * 7}px"></span>`;
+  return `<div class="opp-fan" style="width:${k * 7 + 14}px">${s}</div>`;
 }
 
 function renderCardTableUI() {
+  ensureCardDefs();
   const G = S.game;
   if (!G) return '';
   const T = getCardTable();
   if (!T) return '';
 
-  const myName = (isAdmin() ? 'Juan' : myPlayerName) || G.players[0].name;
-  const myHand = T.hands[myName] || [];
+  const rawName = (isAdmin() ? 'Juan' : myPlayerName) || '';
+  let me = G.players.find(p => p.name.toLowerCase() === rawName.toLowerCase());
+  if (!me && isHost) me = G.players[0];
+  const myName = me ? me.name : rawName;
+  const amPlayer = !!me;
+  const myHand = amPlayer ? (T.hands[myName] || []) : [];
   const curPlayer = G.players[T.turn]?.name;
-  const isMyTurn = isMyCardTurn();
-  const evalHand = evaluateHand(myHand);
+  const isMyTurn = amPlayer && isMyCardTurn();
+  const phase = T.phase;
+  const canDraw = isMyTurn && phase === 'draw';
+  const canDiscard = isMyTurn && phase === 'discard';
 
-  // Rivales (arriba de la mesa)
-  const opponents = G.players.filter(p => p.name.toLowerCase() !== myName.toLowerCase());
+  const ev = amPlayer ? evaluateHand(myHand.length === 8 ? myHand : myHand) : evaluateHand([]);
+  const best = (canDiscard && myHand.length === 8) ? bestDiscardChoice(myHand) : null;
+  const selCard = myHand.find(c => c.id === window._selectedHandCardId) || null;
+  if (!selCard) window._selectedHandCardId = null;
 
+  // Rivales
+  const opponents = G.players.filter(p => !me || p.name !== me.name);
   const opponentsHTML = opponents.map(p => {
     const pHand = T.hands[p.name] || [];
-    const isTheirTurn = G.players[T.turn]?.name === p.name;
-    const isOut = p.out;
-    return `
-      <div class="opp-chip ${isTheirTurn ? 'active-turn' : ''} ${isOut ? 'out' : ''}">
-        <div class="opp-avatar">${isTheirTurn ? '🟢' : '👤'}</div>
-        <div class="opp-info">
-          <div class="opp-name">${esc(p.name)} ${isTheirTurn ? '<b style="color:#4ade80">(Turno)</b>' : ''}</div>
-          <div class="opp-cards-count">${isOut ? '💀 Eliminado' : `🂠 ${pHand.length} cartas · ${p.score} pts`}</div>
-        </div>
+    const theirTurn = curPlayer === p.name && phase !== 'round_ended';
+    return `<div class="opp-chip ${theirTurn ? 'active-turn' : ''} ${p.out ? 'out' : ''}">
+      ${p.out ? '<div class="opp-avatar">💀</div>' : renderOppCards(pHand.length)}
+      <div class="opp-info">
+        <div class="opp-name">${esc(p.name)}</div>
+        <div class="opp-cards-count">${p.out ? 'Eliminado' : `${p.score} pts${theirTurn ? (phase === 'draw' ? ' · robando…' : ' · tirando…') : ''}`}</div>
       </div>
-    `;
+    </div>`;
   }).join('');
 
-  // Centro de la mesa: Mazo y Pozo
-  const topDiscard = T.discard[T.discard.length - 1];
-  const canDraw = isMyTurn && T.phase === 'draw';
-  const canDiscard = isMyTurn && T.phase === 'discard';
-
-  const deckHTML = `
-    <div class="deck-pile ${canDraw ? 'clickable-glow' : ''}" onclick="${canDraw ? `handleCardDraw('deck')` : ''}" title="Robar del mazo">
-      <div class="card-stack-effect"></div>
-      <div class="p-card card-back">
-        <div class="deck-count">${T.deck.length}</div>
+  // Mazo y descarte
+  const top = T.discard[T.discard.length - 1];
+  const under = T.discard.slice(-3, -1);
+  const deckHTML = `<div class="pile ${canDraw ? 'pile-glow' : ''}" onclick="${canDraw ? "handleCardDraw('deck')" : ''}">
+      <div class="pile-cards"><div class="pile-shadow"></div>${renderCardSVG(null, true)}<span class="deck-count">${T.deck.length}</span></div>
+      <div class="pile-label">${canDraw ? '👆 ROBAR' : 'Mazo'}</div>
+    </div>`;
+  const discardClick = canDraw && top ? "handleCardDraw('discard')" : (canDiscard ? 'discardOnPile()' : '');
+  const discardHTML = `<div class="pile ${(canDraw && top) || canDiscard ? 'pile-glow' : ''} ${canDiscard ? 'pile-drop' : ''}" onclick="${discardClick}">
+      <div class="pile-cards">
+        ${under.map((c, i) => `<div class="pile-under" style="transform:translate(${(i - 1) * 6 - 4}px,0) rotate(${(i - 1) * 9 - 4}deg)">${renderCardSVG(c, false, false, false, { noClick: true })}</div>`).join('')}
+        ${top ? renderCardSVG(top, false, false, false, { noClick: true }) : '<div class="empty-pile">Vacío</div>'}
       </div>
-      <div class="pile-label">Mazo (${T.deck.length})</div>
-    </div>
-  `;
+      <div class="pile-label">${canDraw && top ? '👆 COGER' : (canDiscard ? '👇 TIRAR AQUÍ' : 'Descarte')}</div>
+    </div>`;
 
-  const discardHTML = `
-    <div class="discard-pile ${canDraw && topDiscard ? 'clickable-glow' : ''}" onclick="${canDraw && topDiscard ? `handleCardDraw('discard')` : ''}" title="Robar del pozo">
-      ${topDiscard ? renderCardSVG(topDiscard) : '<div class="empty-pile">Vacío</div>'}
-      <div class="pile-label">Pozo (Descartes)</div>
-    </div>
-  `;
+  // Instrucciones claras por paso
+  let step = '';
+  if (phase === 'round_ended') step = '🏁 Mano terminada';
+  else if (canDraw) step = '<span class="step on">① Roba</span><span class="step">② Tira</span>';
+  else if (canDiscard) step = '<span class="step done">① Roba ✓</span><span class="step on">② Tira o cierra</span>';
+  else step = `⏳ Juega <b>${esc(curPlayer || '')}</b>`;
 
-  // Combinaciones detectadas en mi mano
-  let meldsBadgeHTML = '';
-  if (evalHand.melds.length) {
-    meldsBadgeHTML = evalHand.melds.map(m => {
-      const isStr = isValidStraight(m);
-      const label = isStr ? `Escalera (${m[0].suit})` : `Trío de ${m.find(c => !c.isJoker)?.num || ''}s`;
-      return `<span class="badge" style="background:#1b4329;color:#bbf7d0;border-color:#4ade80">🟢 ${label}</span>`;
-    }).join(' ');
+  let helpTxt = '';
+  if (canDraw) helpTxt = 'Toca el <b>mazo</b> (carta nueva) o el <b>descarte</b> (la última carta tirada).';
+  else if (canDiscard) helpTxt = selCard ? `Has elegido <b>${esc(cardLabel(selCard))}</b>. Toca «Tirar» o el montón de descarte.` : 'Toca la carta de tu mano que quieres <b>tirar</b>. ¿Dudas? Pulsa 💡.';
+  else if (phase !== 'round_ended') helpTxt = 'Mientras esperas puedes ordenar tu mano.';
+
+  const bannerHTML = `<div class="ft-banner ${isMyTurn ? 'mine' : ''}">
+      <div class="ft-steps">${step}</div>
+      ${helpTxt ? `<div class="ft-help">${helpTxt}</div>` : ''}
+      ${T.lastMsg ? `<div class="ft-last">${esc(T.lastMsg)}</div>` : ''}
+    </div>`;
+
+  // Mi mano agrupada
+  let handHTML = '';
+  if (amPlayer) {
+    const groups = handGroups(myHand, ev);
+    handHTML = groups.map(g => `<div class="hgroup ${g.type}">
+        <div class="hgroup-cards">${g.cards.map(c => renderCardSVG(c, false, c.id === window._selectedHandCardId, c.id === T.drawnCard?.id && phase === 'discard')).join('')}</div>
+        ${g.type === 'meld' ? '<div class="hgroup-tag ok">✔ ligadas</div>' : (g.type === 'loose' ? '<div class="hgroup-tag">sueltas</div>' : '')}
+      </div>`).join('');
   }
 
-  // Resumen de puntos sueltos
-  const pointsBadge = `
-    <div class="hand-score-pill ${evalHand.canClose ? 'can-close' : ''}">
-      <span>Cartas sueltas: <b>${evalHand.unmeldedScore} pts</b></span>
-      ${evalHand.canClose ? '<span class="can-close-tag">¡PUEDES CERRAR!</span>' : '<span class="muted" style="color:#d1fae5">(máx 5 para cerrar)</span>'}
-    </div>
-  `;
-
-  // Botones de acción
-  const actionsHTML = `
-    <div class="table-action-bar">
-      ${T.phase === 'draw' ? `
-        <button class="btn ${canDraw ? 'btn-gold' : 'disabled'}" onclick="handleCardDraw('deck')">🃏 Robar Mazo</button>
-        <button class="btn ${canDraw && topDiscard ? 'btn-gold' : 'disabled'}" onclick="handleCardDraw('discard')">📥 Robar Pozo</button>
-      ` : `
-        <button class="btn btn-discard ${window._selectedHandCardId ? '' : 'disabled'}" onclick="handleCardDiscard(false)">📤 Tirar carta</button>
-        ${evalHand.canClose ? `
-          <button class="btn btn-close-round" onclick="handleCardDiscard(true)">🚪 ¡CERRAR MANO! (${evalHand.unmeldedScore} pts)</button>
-        ` : ''}
-      `}
-      <div class="sort-buttons">
-        <button class="btn ghost sm" style="color:#e2e8f0;border-color:#64748b;padding:5px 8px" onclick="sortHandCards('suit')">Palo</button>
-        <button class="btn ghost sm" style="color:#e2e8f0;border-color:#64748b;padding:5px 8px" onclick="sortHandCards('num')">Número</button>
-      </div>
-    </div>
-  `;
-
-  // Si la ronda ha terminado, modal de recuento
-  let roundEndModalHTML = '';
-  if (T.phase === 'round_ended' && T.roundSummary) {
-    roundEndModalHTML = renderRoundEndModal(T.roundSummary);
+  // Acciones
+  let actions = '';
+  if (amPlayer && canDiscard) {
+    actions = `<div class="ft-actions">
+        <button class="ft-btn primary ${selCard ? '' : 'off'}" onclick="discardOnPile()">📤 ${selCard ? 'Tirar ' + esc(cardLabel(selCard)) : 'Elige una carta para tirar'}</button>
+        ${best && best.canClose ? `<button class="ft-btn close" onclick="closeHandSmart()">🚪 CERRAR LA MANO · quedan ${best.score} pts</button>` : ''}
+        <button class="ft-btn ghost" onclick="hintDiscard()">💡 Pista</button>
+      </div>`;
+  } else if (amPlayer && canDraw) {
+    actions = `<div class="ft-actions">
+        <button class="ft-btn primary" onclick="handleCardDraw('deck')">🂠 Robar del mazo</button>
+        <button class="ft-btn ${top ? 'primary alt' : 'off'}" onclick="handleCardDraw('discard')">📥 Coger ${top ? esc(cardLabel(top)) : 'descarte'}</button>
+      </div>`;
   }
+
+  const sortBar = amPlayer ? `<div class="ft-sort">
+      <button class="${window._handMode === 'auto' ? 'on' : ''}" onclick="sortHandCards('auto')">✨ Agrupar</button>
+      <button class="${window._handMode === 'suit' ? 'on' : ''}" onclick="sortHandCards('suit')">Por palo</button>
+      <button class="${window._handMode === 'num' ? 'on' : ''}" onclick="sortHandCards('num')">Por número</button>
+    </div>` : '';
+
+  const handSection = amPlayer ? `
+    <div class="my-hand-section">
+      <div class="hand-header">
+        <div class="hand-owner">Tu mano · ${esc(myName)}</div>
+        <div class="hand-score-pill ${ev.canClose && myHand.length === 7 ? 'can-close' : ''}">
+          ${myHand.length === 7 ? `Sueltas: <b>${ev.unmeldedScore} pts</b>${ev.canClose ? ' · ¡podrías cerrar!' : ''}` : `${myHand.length} cartas`}
+        </div>
+      </div>
+      <div class="ft-hand">${handHTML}</div>
+      ${actions}
+      ${sortBar}
+    </div>` : `<div class="my-hand-section"><div class="ft-help" style="text-align:center">👁️ Estás viendo la mesa. Puedes seguir la partida y el chat.</div></div>`;
+
+  const roundEndModalHTML = (phase === 'round_ended' && T.roundSummary) ? renderRoundEndModal(T.roundSummary) : '';
 
   return `
     <div class="felt-table">
-      <!-- Barra superior de alternancia Tapete / Marcador -->
       <div class="table-top-bar">
         <div class="view-switcher">
           <button class="switcher-btn active" onclick="window._activeCardView='table';render()">🎴 Tapete</button>
           <button class="switcher-btn" onclick="window._activeCardView='scoreboard';render()">📊 Marcador</button>
         </div>
         <div class="table-header-info" style="display:flex;gap:4px;align-items:center">
-          <span class="room-code-badge">${G.mode === 'online' ? 'Sala ' + G.roomCode : 'Mesa Virtual'}</span>
-          <button class="btn ghost sm" style="color:#f8fafc;border-color:#94a3b8;padding:4px 8px;font-size:.78rem" onclick="openRoomChatModal()">💬 Chat</button>
-          <button class="btn ghost sm" style="color:#f8fafc;border-color:#94a3b8;padding:4px 8px;font-size:.78rem" onclick="toggleSoloPracticeMode()">${window._soloPracticeMode ? '🤖 Bots ON' : '👤 Bots OFF'}</button>
+          <span class="room-code-badge">${G.mode === 'online' ? 'Sala ' + G.roomCode : 'Mesa'}</span>
+          <button class="btn ghost sm" style="color:#f8fafc;border-color:#94a3b8;padding:4px 8px;font-size:.78rem" onclick="openRoomChatModal()">💬</button>
+          <button class="btn ghost sm" style="color:#f8fafc;border-color:#94a3b8;padding:4px 8px;font-size:.78rem" onclick="toggleSoloPracticeMode()">${window._soloPracticeMode ? '🤖 Bots ON' : '🤖 Bots'}</button>
         </div>
       </div>
 
-      <!-- Rivales -->
-      <div class="opponents-strip">
-        ${opponentsHTML}
-      </div>
+      <div class="opponents-strip">${opponentsHTML}</div>
 
-      <!-- Centro de la mesa: Tapete con Mazo y Pozo -->
       <div class="table-center-felt">
-        <div class="piles-wrapper">
-          ${deckHTML}
-          ${discardHTML}
-        </div>
-        <div class="table-banner">
-          <div class="banner-text">${isMyTurn ? (T.phase === 'draw' ? '🟢 <b>Tu turno:</b> Roba una carta del mazo o del pozo' : '🟢 <b>Tu turno:</b> Selecciona una carta y pulsa «Tirar carta» o «Cerrar»') : `⏳ Turno de <b>${curPlayer}</b> (${T.phase === 'draw' ? 'robando...' : 'descartando...'})`}</div>
-          ${T.lastMsg ? `<div class="banner-subtext">${esc(T.lastMsg)}</div>` : ''}
-        </div>
+        <div class="piles-wrapper">${deckHTML}${discardHTML}</div>
+        ${bannerHTML}
       </div>
 
-      <!-- Mi Mano de Cartas -->
-      <div class="my-hand-section">
-        <div class="hand-header">
-          <div class="hand-owner">Tu Mano (${esc(myName)})</div>
-          <div class="hand-badges">${meldsBadgeHTML}</div>
-          ${pointsBadge}
-        </div>
-        
-        <div class="cards-fan">
-          ${myHand.map(c => renderCardSVG(c, false, c.id === window._selectedHandCardId, c.id === T.drawnCard?.id)).join('')}
-        </div>
-
-        ${actionsHTML}
-      </div>
-
+      ${handSection}
       ${roundEndModalHTML}
     </div>
   `;
@@ -1011,14 +1195,12 @@ function renderCardTableUI() {
 
 function renderRoundEndModal(summary) {
   const evals = summary.evals || {};
+  const mini = c => renderCardSVG(c, false, false, false, { mini: true });
   return `
     <div class="round-end-overlay">
       <div class="round-end-card">
-        <div class="round-end-title">
-          <span>🏆 ¡Mano cerrada por ${esc(summary.closer)}!</span>
-        </div>
-        <p class="muted" style="margin:4px 0 14px">Resultado y puntos calculados automáticamente para el marcador:</p>
-        
+        <div class="round-end-title"><span>🏆 ¡${esc(summary.closer)} ha cerrado la mano!</span></div>
+        <p class="muted" style="margin:4px 0 14px">Puntos calculados automáticamente para el marcador:</p>
         <div class="round-end-players">
           ${Object.keys(evals).map(name => {
             const ev = evals[name];
@@ -1026,29 +1208,18 @@ function renderRoundEndModal(summary) {
             return `
               <div class="round-player-row ${isCloser ? 'closer-row' : ''}">
                 <div class="row between">
-                  <b>${esc(name)} ${isCloser ? '🚪 (Cerró)' : ''}</b>
+                  <b>${esc(name)} ${isCloser ? '🚪 (cerró)' : ''}</b>
                   <b style="font-size:1.15rem;color:${ev.finalScore <= 0 ? 'var(--ok)' : 'var(--accent)'}">${ev.finalScore > 0 ? '+' + ev.finalScore : ev.finalScore} pts</b>
                 </div>
                 <div class="round-cards-preview">
-                  ${(ev.melds || []).map(m => `
-                    <div class="meld-group">
-                      ${m.map(c => `<span class="mini-card ${c.suit}">${c.isJoker ? '🃏' : c.num + SUIT_INFOS[c.suit].symbol}</span>`).join('')}
-                    </div>
-                  `).join(' ')}
-                  ${ev.unmelded.length ? `
-                    <div class="unmelded-group">
-                      <span class="muted" style="font-size:.72rem">Sueltas:</span>
-                      ${ev.unmelded.map(c => `<span class="mini-card loose ${c.suit}">${c.isJoker ? '🃏' : c.num + SUIT_INFOS[c.suit].symbol}</span>`).join('')}
-                    </div>
-                  ` : '<span style="color:var(--ok);font-size:.78rem">¡Todas ligadas!</span>'}
+                  ${(ev.melds || []).map(m => `<div class="meld-group">${m.map(mini).join('')}</div>`).join(' ')}
+                  ${ev.unmelded.length ? `<div class="unmelded-group"><span class="muted" style="font-size:.72rem">Sueltas:</span>${ev.unmelded.map(mini).join('')}</div>` : '<span style="color:var(--ok);font-size:.78rem">¡Todas ligadas!</span>'}
                 </div>
-                ${ev.penalized ? '<div style="color:var(--accent);font-size:.78rem;font-weight:700">⚠️ Penalizado con +25 pts por no superar a los rivales</div>' : ''}
-              </div>
-            `;
+                ${ev.penalized ? '<div style="color:var(--accent);font-size:.78rem;font-weight:700">⚠️ Penalizado por no superar a los rivales</div>' : ''}
+              </div>`;
           }).join('')}
         </div>
-
-        <button class="btn block" style="margin-top:14px;background:#1e4620;border-color:#1e4620" onclick="handleNextCardRound()">🂠 Siguiente Mano ›</button>
+        <button class="btn block" style="margin-top:14px;background:#1e4620;border-color:#1e4620" onclick="handleNextCardRound()">🂠 Siguiente mano ›</button>
       </div>
     </div>
   `;

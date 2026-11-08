@@ -1,5 +1,5 @@
 // ===== Chinchón – Marcador =====
-const APP_VERSION = '1.17.4';
+const APP_VERSION = '1.18.0';
 const KEY = 'chinchon-data-v1';
 const OFFICIAL_RULES = [
   ['La baraja', 'Se juega con baraja española de 40 cartas (sin ochos ni nueves). Pueden jugar de 2 a 6 jugadores.'],
@@ -1171,6 +1171,7 @@ function flushMqttOutbox() {
       const m = new Paho.MQTT.Message(JSON.stringify(item.data));
       m.destinationName = item.dest;
       m.qos = 1;
+      if (item.retained) m.retained = true;
       mqttClient.send(m);
     } catch(e) {
       _mqttOutbox.push(item);
@@ -1221,6 +1222,7 @@ const _mqttFacade = {
         const mm = new Paho.MQTT.Message(payload);
         mm.destinationName = dest;
         mm.qos = 1;
+        if (m.retained) mm.retained = true;
         l.client.send(mm);
         sent++;
       } catch(e) {}
@@ -1286,6 +1288,7 @@ function _connectLink(l) {
         cbs.forEach(f => { try { f(); } catch(e) {} });
         if (!isHost || !S.game) sendMqtt({ type: 'reqSync' });
         resendAllPending();
+        republishPushSub();
       },
       onFailure: () => {
         if (l.client !== c) return;
@@ -1322,9 +1325,9 @@ function initMqtt(roomCode, onConnect) {
   _links.forEach(_connectLink);
 }
 
-function _publish(dest, data) {
+function _publish(dest, data, retained) {
   if (!_anyConnected()) {
-    _mqttOutbox.push({ dest, data });
+    _mqttOutbox.push({ dest, data, retained });
     ensureMqttConnected();
     return;
   }
@@ -1332,9 +1335,10 @@ function _publish(dest, data) {
     const m = new Paho.MQTT.Message(JSON.stringify(data));
     m.destinationName = dest;
     m.qos = 1;
+    if (retained) m.retained = true;
     mqttClient.send(m);
   } catch(e) {
-    _mqttOutbox.push({ dest, data });
+    _mqttOutbox.push({ dest, data, retained });
     ensureMqttConnected();
   }
 }
@@ -1364,6 +1368,7 @@ function sendReliable(data) {
   data.sentAt = Date.now();
   const p = getPending(); p.push(data); setPending(p);
   sendGlobalMqtt({ ...data });
+  pushToTargets(data);
 }
 function _pendingTargets(x) {
   return [x.target, ...(Array.isArray(x.targets) ? x.targets : [])].filter(Boolean).map(t => t.trim().toLowerCase());
@@ -1410,6 +1415,119 @@ document.addEventListener('visibilitychange', () => {
 });
 window.addEventListener('online', () => ensureMqttConnected(true, true));
 setInterval(() => { if (!_anyConnected()) ensureMqttConnected(); }, 8000);
+
+// ===== AVISOS PUSH (llegan aunque la app esté cerrada) =====
+const VAPID_PUBLIC_KEY = 'BAABlEH7Ftw8VxQd5PD6U1LguI_T-kxxdLG6dHkpWtnOQrs0GTZKmQrZo0B08PWyynJKFfKl_EynpU-SncasvII';
+const PUSH_SUB_PREFIX = 'chinchon/v1/sub/';
+_subTopics.add(PUSH_SUB_PREFIX + '+');
+const _lastPushAt = {};
+
+function pushSupported() { return ('serviceWorker' in navigator) && ('PushManager' in window) && typeof Notification !== 'undefined'; }
+function _isIOS() { return /iphone|ipad|ipod/i.test(navigator.userAgent || ''); }
+function _isStandalone() { return (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) || navigator.standalone === true; }
+function urlB64ToUint8Array(b) {
+  const pad = '='.repeat((4 - b.length % 4) % 4);
+  const raw = atob((b + pad).replace(/-/g, '+').replace(/_/g, '/'));
+  const out = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+  return out;
+}
+function canonKey(name) { return getCanonicalPlayerName(name || '').toLowerCase().replace(/[^a-z0-9]/g, '_'); }
+function _myPushName() { return (isAdmin() ? 'Juan' : (myPlayerName || '')).trim(); }
+function getPushSubs() { try { return JSON.parse(localStorage.getItem('chinchon_push_subs') || '{}'); } catch (e) { return {}; } }
+function savePushSubs(m) { try { localStorage.setItem('chinchon_push_subs', JSON.stringify(m)); } catch (e) {} }
+function pushEnabled() { return pushSupported() && Notification.permission === 'granted' && localStorage.getItem('chinchon_push_enabled') === '1'; }
+
+function publishPushSub(sub) {
+  const name = _myPushName();
+  if (!name || !sub) return;
+  const data = { type: 'push_sub', name, sub: sub.toJSON ? sub.toJSON() : sub, clientId: CLIENT_ID, from: name, _mid: uid() + uid() };
+  _publish(PUSH_SUB_PREFIX + canonKey(name), data, true);
+}
+let _lastRepub = 0;
+async function republishPushSub() {
+  try {
+    if (!pushEnabled() || Date.now() - _lastRepub < 60000) return;
+    _lastRepub = Date.now();
+    const reg = await navigator.serviceWorker.ready;
+    const sub = await reg.pushManager.getSubscription();
+    if (sub) publishPushSub(sub);
+  } catch (e) {}
+}
+
+async function enablePushNotifications() {
+  if (!pushSupported()) {
+    toast(_isIOS() && !_isStandalone()
+      ? '📲 En iPhone: ábrela en Safari → Compartir → «Añadir a pantalla de inicio», y activa los avisos desde el icono'
+      : 'Este navegador no permite avisos con la app cerrada', 5000);
+    return;
+  }
+  const name = _myPushName();
+  if (!name || name.toLowerCase() === 'invitado') { toast('Primero elige tu nombre'); return; }
+  try {
+    const perm = await Notification.requestPermission();
+    if (perm !== 'granted') { toast('Has bloqueado los avisos. Actívalos en los ajustes del móvil/navegador.', 4500); return; }
+    const reg = await navigator.serviceWorker.ready;
+    let sub = await reg.pushManager.getSubscription();
+    if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlB64ToUint8Array(VAPID_PUBLIC_KEY) });
+    localStorage.setItem('chinchon_push_enabled', '1');
+    publishPushSub(sub);
+    toast('🔔 ¡Avisos activados! Te llegarán aunque cierres la app', 3500);
+    render();
+    if (window._currentChatWith) openFriendChatModal(window._currentChatWith);
+  } catch (e) {
+    toast('No se pudieron activar los avisos: ' + ((e && e.message) || e), 4500);
+  }
+}
+function requestNotificationPermission() { return enablePushNotifications(); }
+
+function isFriendOnline(name) {
+  const t = window._onlineFriends || {};
+  return [name, getCanonicalPlayerName(name)].map(x => (x || '').trim().toLowerCase()).some(k => k && Date.now() - (t[k] || 0) < 50000);
+}
+async function pushToTargets(data, force) {
+  try {
+    const names = [data.target, ...(Array.isArray(data.targets) ? data.targets : [])].filter(Boolean);
+    if (!force && names.some(isFriendOnline)) return;
+    const map = getPushSubs();
+    const seen = new Set(), subs = [], keys = [];
+    names.forEach(n => {
+      const k = canonKey(n);
+      if (seen.has(k) || !map[k]) return;
+      if (!force && Date.now() - (_lastPushAt[k] || 0) < 15000) return;
+      seen.add(k); subs.push(map[k]); keys.push(k); _lastPushAt[k] = Date.now();
+    });
+    if (!subs.length) return;
+    const r = await fetch(location.origin + '/api/push', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ subs }) });
+    const j = await r.json();
+    (j.results || []).forEach((x, i) => {
+      if (x.status === 404 || x.status === 410) { const m = getPushSubs(); delete m[keys[i]]; savePushSubs(m); }
+    });
+    return j;
+  } catch (e) {}
+}
+async function testPushToMe() {
+  try {
+    const reg = await navigator.serviceWorker.ready;
+    const sub = await reg.pushManager.getSubscription();
+    if (!sub) return toast('Primero activa los avisos');
+    const r = await fetch(location.origin + '/api/push', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ subs: [sub.toJSON()] }) });
+    const j = await r.json();
+    const st = j.results && j.results[0] && j.results[0].status;
+    toast(st >= 200 && st < 300 ? '📨 Aviso enviado: cierra la app y debería sonar en unos segundos' : '⚠️ El servidor de avisos respondió ' + st, 4500);
+  } catch (e) { toast('No se pudo contactar con el servidor de avisos'); }
+}
+function renderPushCard() {
+  if (pushEnabled()) {
+    return `<div class="card" style="margin-bottom:12px;padding:10px 12px;display:flex;justify-content:space-between;align-items:center;gap:8px"><span style="font-size:.84rem">🔔 <b>Avisos activados</b> · te llegan con la app cerrada</span><button class="btn ghost sm" onclick="testPushToMe()">Probar</button></div>`;
+  }
+  const ios = _isIOS() && !_isStandalone();
+  return `<div class="card" style="margin-bottom:12px;padding:12px;border:1.5px solid var(--accent)">
+    <div style="font-weight:700;margin-bottom:4px">🔔 Recibe mensajes y retos aunque tengas la app cerrada</div>
+    <div class="muted" style="font-size:.8rem;margin-bottom:8px">${ios ? 'En iPhone: abre esta web en Safari, pulsa Compartir ➜ «Añadir a pantalla de inicio», abre la app desde el icono y entonces pulsa el botón.' : 'Pulsa el botón y acepta el permiso de notificaciones.'}</div>
+    <button class="btn block" onclick="enablePushNotifications()">🔔 Activar avisos</button>
+  </div>`;
+}
 
 function notifyChatMessage(sender, text) {
   if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
@@ -1690,16 +1808,6 @@ function openFriendChatModal(friendName) {
     const inp = document.getElementById('chat-input');
     if (inp) inp.focus();
   }, 100);
-}
-
-function requestNotificationPermission() {
-  if (typeof Notification !== 'undefined') {
-    Notification.requestPermission().then(p => {
-      if (p === 'granted') toast('🔔 Notificaciones del móvil activadas');
-      else toast('Notificaciones desactivadas en tu navegador');
-      if (window._currentChatWith) openFriendChatModal(window._currentChatWith);
-    });
-  }
 }
 
 function quickSendChat(text) {
@@ -1989,6 +2097,10 @@ function handleMqttMsg(d) {
   if (!d || !d.type) return;
   if (d.clientId && d.clientId === CLIENT_ID) return; // ignorar el eco de mis propios mensajes
   if (d.from === CLIENT_ID) return;
+  if (d.type === 'push_sub') {
+    if (d.name && d.sub && d.sub.endpoint) { const m = getPushSubs(); m[canonKey(d.name)] = d.sub; savePushSubs(m); }
+    return;
+  }
   if (d.type === 'card_action' || d.type.startsWith('card_')) {
     if (window.handleCardTableMsg) window.handleCardTableMsg(d);
     return;
@@ -2795,6 +2907,7 @@ function openAdminSettings(tabName) {
         </div>
         <div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--line)">
           <button class="btn ghost sm block" style="font-size:.8rem" onclick="unlockMobileAudio();playChatSound();toast('🔊 Probando sonido de notificación')">🔊 Probar sonido de notificación</button>
+          <button class="btn ghost sm block" style="font-size:.8rem;margin-top:6px" onclick="enablePushNotifications()">🔔 Activar avisos con la app cerrada</button>
         </div>
       </div>
       <button class="btn ghost block" style="margin-bottom:8px" onclick="promptAdminPin()">👑 ¿Eres Juan? Iniciar sesión como Administrador</button>
@@ -3784,6 +3897,7 @@ function viewGroups() {
   const myName = (myPlayerName || (isAdmin() ? 'Juan' : '')).trim().toLowerCase();
 
   return `
+    ${renderPushCard()}
     <div id="live-tables-section-groups">${renderLiveTablesCard()}</div>
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
       <h2 style="margin:0">👥 Amigos de Chinchón (${friends.length})</h2>

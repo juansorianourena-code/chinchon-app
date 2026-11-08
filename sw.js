@@ -1,4 +1,4 @@
-const VERSION = '1.17.4';
+const VERSION = '1.18.0';
 const CACHE = 'chinchon-' + VERSION;
 const FILES = ['./', 'index.html', 'style.css', 'cards.js', 'app.js', 'mqttws31.min.js', 'manifest.json', 'icon-192.png', 'icon-512.png', 'apple-touch-icon.png'];
 self.addEventListener('install', e => {
@@ -44,4 +44,14 @@ self.addEventListener('notificationclick', e => {
       if (clients.openWindow) return clients.openWindow('./');
     })
   );
+});
+
+// Aviso Web Push (llega con la app cerrada). El contenido real se entrega al abrir la app por la red en vivo.
+self.addEventListener('push', e => {
+  let title = '🃏 Chinchón', body = 'Tienes un mensaje, un reto o te toca jugar. Ábrela para verlo.';
+  try { if (e.data) { const j = e.data.json(); if (j.title) title = j.title; if (j.body) body = j.body; } } catch (err) {}
+  e.waitUntil(self.registration.showNotification(title, {
+    body, icon: 'icon-192.png', badge: 'icon-192.png', vibrate: [200, 100, 200, 100, 300],
+    tag: 'chinchon-push', renotify: true, requireInteraction: false
+  }));
 });
