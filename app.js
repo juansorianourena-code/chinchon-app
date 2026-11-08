@@ -1,5 +1,5 @@
 // ===== Chinchón – Marcador =====
-const APP_VERSION = '1.16.0';
+const APP_VERSION = '1.17.0';
 const KEY = 'chinchon-data-v1';
 const OFFICIAL_RULES = [
   ['La baraja', 'Se juega con baraja española de 40 cartas (sin ochos ni nueves). Pueden jugar de 2 a 6 jugadores.'],
@@ -666,17 +666,26 @@ function viewGame() {
   if (isHost) {
     topHeader = `<div class="row between" style="background:var(--paper2);border:1px solid var(--ink);border-radius:4px;padding:8px 12px;margin-bottom:10px;font-size:.85rem">
       <span>👑 <b>Eres el Administrador</b> ${G.mode === 'online' ? '· Sala ' + esc(G.roomCode) : '· Modo clásico'}</span>
-      <span>${G.mode === 'online' ? '<button class="btn ghost sm" onclick="openShareModal()">🔗 Invitar / Enlace</button>' : ''}</span>
+      <span class="row" style="gap:4px">
+        ${G.mode === 'online' ? '<button class="btn sm" style="padding:4px 8px;font-size:.78rem;background:var(--ok);border-color:var(--ok);color:#fff" onclick="openRoomChatModal()">💬 Chat</button>' : ''}
+        ${G.mode === 'online' ? '<button class="btn ghost sm" onclick="openShareModal()">🔗 Enlace</button>' : ''}
+      </span>
     </div>`;
   } else if (isSpectator) {
     topHeader = `<div class="row between" style="background:#203126;color:#c2eed2;border:1px solid var(--ok);border-radius:6px;padding:8px 12px;margin-bottom:10px;font-size:.85rem">
       <span>👁️ <b>Modo Espectador</b> · Viendo mesa ${esc(G.roomCode)}</span>
-      <button class="btn ghost sm" style="padding:4px 10px;font-size:.8rem;color:#c2eed2;border-color:#c2eed2" onclick="leaveCurrentGame()">🚪 Salir al inicio</button>
+      <span class="row" style="gap:4px">
+        <button class="btn sm" style="padding:4px 8px;font-size:.78rem;background:var(--ok);border-color:var(--ok);color:#fff" onclick="openRoomChatModal()">💬 Chat</button>
+        <button class="btn ghost sm" style="padding:4px 10px;font-size:.8rem;color:#c2eed2;border-color:#c2eed2" onclick="leaveCurrentGame()">🚪 Salir</button>
+      </span>
     </div>`;
   } else {
     topHeader = `<div class="row between" style="background:var(--paper2);border:1px solid var(--ink);border-radius:6px;padding:8px 12px;margin-bottom:10px;font-size:.85rem">
       <span>${roomActive ? `<i class="live-dot"></i> <b>Mesa ${esc(G.roomCode)}</b>` : '👤 <b>Mesa de juego</b>'}</span>
-      <button class="btn ghost sm" style="padding:4px 10px;font-size:.8rem;color:var(--accent);border-color:var(--accent)" onclick="leaveCurrentGame()">🚪 Salir al inicio</button>
+      <span class="row" style="gap:4px">
+        ${roomActive ? '<button class="btn sm" style="padding:4px 8px;font-size:.78rem;background:var(--ok);border-color:var(--ok);color:#fff" onclick="openRoomChatModal()">💬 Chat</button>' : ''}
+        <button class="btn ghost sm" style="padding:4px 10px;font-size:.8rem;color:var(--accent);border-color:var(--accent)" onclick="leaveCurrentGame()">🚪 Salir</button>
+      </span>
     </div>`;
   }
 
@@ -985,6 +994,7 @@ function finishGame(wi, how) {
   const G = S.game; G.winner = G.players[wi].name; G.how = how; G.end = Date.now();
   sendMqtt({ type: 'sync', game: G, draft: {} });
   sendMqtt({ type: 'history_sync', game: G });
+  sendGlobalMqtt({ type: 'game_finished_report', game: G, finishedBy: myPlayerName || (isAdmin() ? 'Juan' : 'Invitado') });
   sendGlobalMqtt({ type: 'table_closed', roomCode: G.roomCode });
   S.games.unshift(G); S.game = null; draft = {}; remoteDrafts = {}; remoteTyping = {}; window._isSpectator = false; window._activeSpectators = []; save(); render();
   winModal(G);
@@ -1021,87 +1031,446 @@ function confetti() {
   }
 }
 
-// ===== SINCRONIZACIÓN EN TIEMPO REAL & MENSAJES =====
-function initMqtt(roomCode, onConnect) {
-  if (mqttClient && mqttClient.isConnected && mqttClient.isConnected()) {
-    if (currentRoomCode !== roomCode) {
-      try { mqttClient.unsubscribe(`chinchon/v1/${currentRoomCode}`); } catch(e) {}
-      currentRoomCode = roomCode;
-      mqttClient.subscribe(`chinchon/v1/${roomCode}`, { qos: 1 });
+// ===== SINCRONIZACIÓN EN TIEMPO REAL & GESTOR DE CONEXIÓN ROBUSTO =====
+const MQTT_BROKERS = [
+  { host: 'broker.emqx.io', port: 8084, path: '/mqtt' },
+  { host: 'broker.hivemq.com', port: 8884, path: '/mqtt' }
+];
+let _currentBrokerIdx = 0;
+let _mqttStatus = 'disconnected'; // 'connected' | 'connecting' | 'disconnected'
+let _reconnectTimer = null;
+let _reconnectAttempts = 0;
+let _mqttOutbox = [];
+
+function updateConnectionIndicator() {
+  const el = $('#conn-dot');
+  if (!el) return;
+  if (_mqttStatus === 'connected') {
+    el.textContent = '🟢';
+    el.title = 'Conectado a la red en vivo (tocar para refrescar)';
+    el.style.opacity = '1';
+  } else if (_mqttStatus === 'connecting') {
+    el.textContent = '🟡';
+    el.title = 'Conectando con el servidor...';
+    el.style.opacity = '0.9';
+  } else {
+    el.textContent = '🔴';
+    el.title = 'Sin conexión. Toca para reconectar ahora';
+    el.style.opacity = '0.7';
+  }
+}
+
+function flushMqttOutbox() {
+  if (!_mqttOutbox.length || !mqttClient || !mqttClient.isConnected || !mqttClient.isConnected()) return;
+  const toSend = [..._mqttOutbox];
+  _mqttOutbox = [];
+  toSend.forEach(item => {
+    try {
+      const m = new Paho.MQTT.Message(JSON.stringify(item.data));
+      m.destinationName = item.dest;
+      m.qos = 1;
+      mqttClient.send(m);
+    } catch(e) {
+      _mqttOutbox.push(item);
     }
+  });
+}
+
+function scheduleMqttReconnect() {
+  if (_reconnectTimer) clearTimeout(_reconnectTimer);
+  _reconnectAttempts++;
+  const delay = Math.min(1200 * Math.pow(1.3, Math.min(_reconnectAttempts, 5)) + Math.random() * 400, 7000);
+  _reconnectTimer = setTimeout(() => {
+    _reconnectTimer = null;
+    initMqtt(currentRoomCode || 'auth_global');
+  }, delay);
+}
+
+function ensureMqttConnected(force = false) {
+  if (force) {
+    if (_reconnectTimer) clearTimeout(_reconnectTimer);
+    try { if (mqttClient) mqttClient.disconnect(); } catch(e) {}
+    mqttClient = null;
+    _mqttStatus = 'disconnected';
+    updateConnectionIndicator();
+    toast('🔄 Reconectando con la red...', 1800);
+    initMqtt(currentRoomCode || 'auth_global');
+    return;
+  }
+  if (!mqttClient || !mqttClient.isConnected || !mqttClient.isConnected()) {
+    initMqtt(currentRoomCode || 'auth_global');
+  }
+}
+
+function initMqtt(roomCode, onConnect) {
+  if (roomCode && roomCode !== 'auth_global') currentRoomCode = roomCode;
+  
+  // Si ya estamos conectados con el socket vivo
+  if (mqttClient && mqttClient.isConnected && mqttClient.isConnected()) {
+    _mqttStatus = 'connected';
+    updateConnectionIndicator();
+    if (roomCode && roomCode !== 'auth_global') {
+      try { mqttClient.subscribe(`chinchon/v1/${roomCode}`, { qos: 1 }); } catch(e) {}
+    }
+    flushMqttOutbox();
     if (onConnect) onConnect();
     return;
   }
+
   if (typeof Paho === 'undefined' || !Paho.MQTT) {
     console.warn('Paho MQTT no disponible');
     return;
   }
-  currentRoomCode = roomCode;
-  const clientId = 'ch_' + Math.random().toString(36).substring(2, 9);
+
+  _mqttStatus = 'connecting';
+  updateConnectionIndicator();
+
+  const broker = MQTT_BROKERS[_currentBrokerIdx];
+  const clientId = 'ch_' + CLIENT_ID + '_' + Math.random().toString(36).substring(2, 6);
+
   try {
-    mqttClient = new Paho.MQTT.Client('broker.emqx.io', 8084, '/mqtt', clientId);
-    mqttClient.onConnectionLost = () => {
-      setTimeout(() => { if (currentRoomCode) initMqtt(currentRoomCode); }, 3500);
+    mqttClient = new Paho.MQTT.Client(broker.host, broker.port, broker.path, clientId);
+
+    mqttClient.onConnectionLost = (responseObject) => {
+      _mqttStatus = 'disconnected';
+      updateConnectionIndicator();
+      _currentBrokerIdx = (_currentBrokerIdx + 1) % MQTT_BROKERS.length;
+      scheduleMqttReconnect();
     };
-    mqttClient.onMessageArrived = msg => {
-      try { handleMqttMsg(JSON.parse(msg.payloadString)); } catch(e) {}
+
+    mqttClient.onMessageArrived = (msg) => {
+      try {
+        const payload = JSON.parse(msg.payloadString);
+        handleMqttMsg(payload);
+      } catch(e) {}
     };
+
     mqttClient.connect({
-      useSSL: true, timeout: 6, cleanSession: true, keepAliveInterval: 30,
+      useSSL: true,
+      timeout: 8,
+      cleanSession: true,
+      keepAliveInterval: 15, // intervalo óptimo para conexiones móviles 4G/5G/Wi-Fi
       onSuccess: () => {
+        _mqttStatus = 'connected';
+        _reconnectAttempts = 0;
+        updateConnectionIndicator();
         try { mqttClient.subscribe('chinchon/v1/auth_global', { qos: 1 }); } catch(e) {}
-        if (roomCode && roomCode !== 'auth_global') {
-          mqttClient.subscribe(`chinchon/v1/${roomCode}`, { qos: 1 });
+        if (currentRoomCode && currentRoomCode !== 'auth_global') {
+          try { mqttClient.subscribe(`chinchon/v1/${currentRoomCode}`, { qos: 1 }); } catch(e) {}
+        }
+        flushMqttOutbox();
+        broadcastPresence();
+        if (isAdmin()) {
+          setTimeout(requestRemoteHistoryFromGuests, 1200);
         }
         if (onConnect) onConnect();
         if (!isHost || !S.game) sendMqtt({ type: 'reqSync' });
       },
-      onFailure: () => fallbackHiveMqtt(roomCode, onConnect)
-    });
-  } catch(e) { console.warn('MQTT err', e); }
-}
-
-function fallbackHiveMqtt(roomCode, onConnect) {
-  try {
-    const clientId = 'ch_' + Math.random().toString(36).substring(2, 9);
-    mqttClient = new Paho.MQTT.Client('broker.hivemq.com', 8884, '/mqtt', clientId);
-    mqttClient.onMessageArrived = msg => {
-      try { handleMqttMsg(JSON.parse(msg.payloadString)); } catch(e) {}
-    };
-    mqttClient.connect({
-      useSSL: true, timeout: 6, cleanSession: true, keepAliveInterval: 30,
-      onSuccess: () => {
-        try { mqttClient.subscribe('chinchon/v1/auth_global', { qos: 1 }); } catch(e) {}
-        if (roomCode && roomCode !== 'auth_global') {
-          mqttClient.subscribe(`chinchon/v1/${roomCode}`, { qos: 1 });
-        }
-        if (onConnect) onConnect();
-        if (!isHost || !S.game) sendMqtt({ type: 'reqSync' });
+      onFailure: (err) => {
+        _mqttStatus = 'disconnected';
+        updateConnectionIndicator();
+        _currentBrokerIdx = (_currentBrokerIdx + 1) % MQTT_BROKERS.length;
+        scheduleMqttReconnect();
       }
     });
-  } catch(e) {}
+  } catch(e) {
+    _mqttStatus = 'disconnected';
+    updateConnectionIndicator();
+    scheduleMqttReconnect();
+  }
 }
 
 function sendMqtt(data) {
-  if (!mqttClient || !mqttClient.isConnected || !mqttClient.isConnected()) return;
+  data.from = CLIENT_ID;
+  const dest = `chinchon/v1/${currentRoomCode || 'auth_global'}`;
+  if (!mqttClient || !mqttClient.isConnected || !mqttClient.isConnected()) {
+    _mqttOutbox.push({ dest, data });
+    ensureMqttConnected();
+    return;
+  }
   try {
-    data.from = CLIENT_ID;
     const m = new Paho.MQTT.Message(JSON.stringify(data));
-    m.destinationName = `chinchon/v1/${currentRoomCode || 'auth_global'}`;
+    m.destinationName = dest;
     m.qos = 1;
     mqttClient.send(m);
-  } catch(e) {}
+  } catch(e) {
+    _mqttOutbox.push({ dest, data });
+    ensureMqttConnected();
+  }
 }
 
 function sendGlobalMqtt(data) {
-  if (!mqttClient || !mqttClient.isConnected || !mqttClient.isConnected()) return;
+  data.from = CLIENT_ID;
+  const dest = 'chinchon/v1/auth_global';
+  if (!mqttClient || !mqttClient.isConnected || !mqttClient.isConnected()) {
+    _mqttOutbox.push({ dest, data });
+    ensureMqttConnected();
+    return;
+  }
   try {
-    data.from = CLIENT_ID;
     const m = new Paho.MQTT.Message(JSON.stringify(data));
-    m.destinationName = 'chinchon/v1/auth_global';
+    m.destinationName = dest;
     m.qos = 1;
     mqttClient.send(m);
+  } catch(e) {
+    _mqttOutbox.push({ dest, data });
+    ensureMqttConnected();
+  }
+}
+
+// ===== MENSAJERÍA DIRECTA & CHAT =====
+window._currentChatWith = null;
+window._roomChatMessages = [];
+
+function playChatSound() {
+  if (typeof S !== 'undefined' && S && S.adminConfig && S.adminConfig.soundEnabled === false) return;
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const now = ctx.currentTime;
+    [587.33, 880].forEach((freq, i) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(freq, now + i * 0.08);
+      gain.gain.setValueAtTime(0.25, now + i * 0.08);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + i * 0.08 + 0.25);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(now + i * 0.08);
+      osc.stop(now + i * 0.08 + 0.26);
+    });
   } catch(e) {}
+}
+
+function getChatStorageKey(friendName) {
+  const canon = getCanonicalPlayerName(friendName).toLowerCase().replace(/[^a-z0-9]/g, '_');
+  return 'chinchon_chat_' + canon;
+}
+
+function getChatHistory(friendName) {
+  try {
+    const raw = localStorage.getItem(getChatStorageKey(friendName));
+    return raw ? JSON.parse(raw) : [];
+  } catch(e) { return []; }
+}
+
+function saveChatMessage(friendName, msg) {
+  try {
+    const history = getChatHistory(friendName);
+    history.push(msg);
+    if (history.length > 80) history.shift();
+    localStorage.setItem(getChatStorageKey(friendName), JSON.stringify(history));
+  } catch(e) {}
+}
+
+function openFriendChatModal(friendName) {
+  window._currentChatWith = friendName;
+  const myName = myPlayerName || (isAdmin() ? 'Juan' : 'Amigo');
+  const history = getChatHistory(friendName);
+  const isOnline = window._onlineFriends && window._onlineFriends[getCanonicalPlayerName(friendName).toLowerCase()];
+
+  modal(`
+    <div class="chat-container">
+      <div class="row between" style="border-bottom:1px solid var(--line);padding-bottom:8px;margin-bottom:8px">
+        <div style="display:flex;align-items:center;gap:8px">
+          <span style="font-size:1.4rem">💬</span>
+          <div>
+            <b>Chat con ${esc(friendName)}</b>
+            <div style="font-size:.76rem">
+              ${isOnline ? '🟢 <span style="color:var(--ok);font-weight:600">En línea ahora</span>' : '<span class="muted">⚪ Desconectado (le llegará al abrir la app)</span>'}
+            </div>
+          </div>
+        </div>
+        <button class="btn ghost sm" onclick="window._currentChatWith=null;closeModal()">✕</button>
+      </div>
+
+      <div id="chat-msgs-box" class="chat-messages">
+        ${history.length ? history.map(m => `
+          <div class="chat-bubble ${m.me ? 'mine' : 'theirs'}">
+            <div>${esc(m.text)}</div>
+            <div class="chat-time">${new Date(m.time).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })}</div>
+          </div>
+        `).join('') : '<div class="muted" style="text-align:center;margin:auto">No hay mensajes todavía. ¡Dile algo!</div>'}
+      </div>
+
+      <div class="chat-chips">
+        <button class="chat-chip" onclick="quickSendChat('¿Echamos una partida? 🂠')">🂠 ¿Echamos una partida?</button>
+        <button class="chat-chip" onclick="quickSendChat('¡Te reto ahora mismo! ⚔️')">⚔️ ¡Te reto ahora!</button>
+        <button class="chat-chip" onclick="quickSendChat('¡Qué cabrón! 😂')">😂 ¡Qué cabrón!</button>
+        <button class="chat-chip" onclick="quickSendChat('Menuda mano tengo 🔥')">🔥 Menuda mano</button>
+        <button class="chat-chip" onclick="quickSendChat('¡He cerrado! 🏆')">🏆 ¡He cerrado!</button>
+        <button class="chat-chip" onclick="quickSendChat('¿Dónde estás? 👀')">👀 ¿Dónde estás?</button>
+      </div>
+
+      <div class="chat-input-bar">
+        <input id="chat-input" placeholder="Escribe a ${esc(friendName)}..." onkeydown="if(event.key==='Enter')sendFriendChatMessage('${esc(friendName)}')">
+        <button class="btn" style="background:#22543d;border-color:#22543d;color:#fff" onclick="sendFriendChatMessage('${esc(friendName)}')">Enviar ›</button>
+      </div>
+    </div>
+  `);
+
+  setTimeout(() => {
+    const box = document.getElementById('chat-msgs-box');
+    if (box) box.scrollTop = box.scrollHeight;
+    const inp = document.getElementById('chat-input');
+    if (inp) inp.focus();
+  }, 100);
+}
+
+function quickSendChat(text) {
+  const inp = document.getElementById('chat-input');
+  if (inp) inp.value = text;
+  if (window._currentChatWith) {
+    sendFriendChatMessage(window._currentChatWith);
+  }
+}
+
+function sendFriendChatMessage(friendName) {
+  const inp = document.getElementById('chat-input');
+  if (!inp) return;
+  const text = (inp.value || '').trim();
+  if (!text) return;
+
+  const myName = myPlayerName || (isAdmin() ? 'Juan' : 'Amigo');
+  const msgObj = {
+    id: uid(),
+    from: myName,
+    target: friendName,
+    text: text,
+    time: Date.now()
+  };
+
+  saveChatMessage(friendName, { ...msgObj, me: true });
+
+  const friendObj = getAllKnownFriends().find(f => f.name.toLowerCase() === friendName.toLowerCase());
+  const targetAliases = friendObj && friendObj.aliases ? friendObj.aliases : [];
+  const allTargets = [friendName, ...targetAliases];
+
+  sendGlobalMqtt({
+    type: 'direct_chat',
+    ...msgObj,
+    targets: allTargets
+  });
+
+  vibrate(25);
+  openFriendChatModal(friendName);
+}
+
+function showIncomingChatBanner(sender, text, isRoom = false) {
+  const existing = document.querySelector('.incoming-chat-banner');
+  if (existing) existing.remove();
+
+  const banner = document.createElement('div');
+  banner.className = 'incoming-chat-banner';
+  banner.onclick = () => {
+    banner.remove();
+    if (isRoom) openRoomChatModal();
+    else openFriendChatModal(sender);
+  };
+  banner.innerHTML = `
+    <div class="chat-text">
+      <span class="chat-sender">💬 ${esc(sender)}:</span> "${esc(text)}"
+    </div>
+    <button class="btn sm" style="padding:4px 10px;font-size:.78rem;background:#22c55e;color:#052e16;border:0;font-weight:700">Responder</button>
+  `;
+  document.body.appendChild(banner);
+  setTimeout(() => { if (banner.parentNode) banner.remove(); }, 6000);
+}
+
+function openRoomChatModal() {
+  window._roomChatOpen = true;
+  const myName = myPlayerName || (isAdmin() ? 'Juan' : 'Amigo');
+  const msgs = window._roomChatMessages || [];
+
+  modal(`
+    <div class="chat-container">
+      <div class="row between" style="border-bottom:1px solid var(--line);padding-bottom:8px;margin-bottom:8px">
+        <div style="display:flex;align-items:center;gap:8px">
+          <span style="font-size:1.4rem">💬</span>
+          <div>
+            <b>Chat de la Mesa (${currentRoomCode || 'Sala'})</b>
+            <div class="muted" style="font-size:.76rem">Todos los jugadores en directo</div>
+          </div>
+        </div>
+        <button class="btn ghost sm" onclick="window._roomChatOpen=false;closeModal()">✕</button>
+      </div>
+
+      <div id="room-chat-msgs-box" class="chat-messages">
+        ${msgs.length ? msgs.map(m => {
+          const isMine = m.from.trim().toLowerCase() === myName.trim().toLowerCase();
+          return `
+            <div class="chat-bubble ${isMine ? 'mine' : 'theirs'}">
+              <div style="font-size:.72rem;font-weight:700;margin-bottom:2px;color:${isMine ? '#86efac' : 'var(--accent)'}">${esc(m.from)}</div>
+              <div>${esc(m.text)}</div>
+              <div class="chat-time">${new Date(m.time).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })}</div>
+            </div>
+          `;
+        }).join('') : '<div class="muted" style="text-align:center;margin:auto">No hay mensajes en la mesa. ¡Escribe a los demás!</div>'}
+      </div>
+
+      <div class="chat-chips">
+        <button class="chat-chip" onclick="quickSendRoomChat('¡Buena mano! 🂠')">🂠 ¡Buena mano!</button>
+        <button class="chat-chip" onclick="quickSendRoomChat('Te toca robar ⏳')">⏳ Te toca robar</button>
+        <button class="chat-chip" onclick="quickSendRoomChat('¡Qué cabrón! 😂')">😂 ¡Qué cabrón!</button>
+        <button class="chat-chip" onclick="quickSendRoomChat('Cuidado que cierro 🚪')">🚪 Cuidado que cierro</button>
+      </div>
+
+      <div class="chat-input-bar">
+        <input id="room-chat-input" placeholder="Escribe a la mesa..." onkeydown="if(event.key==='Enter')sendRoomChatMessage()">
+        <button class="btn" style="background:#22543d;border-color:#22543d;color:#fff" onclick="sendRoomChatMessage()">Enviar ›</button>
+      </div>
+    </div>
+  `);
+
+  setTimeout(() => {
+    const box = document.getElementById('room-chat-msgs-box');
+    if (box) box.scrollTop = box.scrollHeight;
+    const inp = document.getElementById('room-chat-input');
+    if (inp) inp.focus();
+  }, 100);
+}
+
+function quickSendRoomChat(text) {
+  const inp = document.getElementById('room-chat-input');
+  if (inp) inp.value = text;
+  sendRoomChatMessage();
+}
+
+function sendRoomChatMessage() {
+  const inp = document.getElementById('room-chat-input');
+  if (!inp) return;
+  const text = (inp.value || '').trim();
+  if (!text) return;
+
+  const myName = myPlayerName || (isAdmin() ? 'Juan' : 'Amigo');
+  const msgObj = {
+    id: uid(),
+    from: myName,
+    roomCode: currentRoomCode,
+    text: text,
+    time: Date.now()
+  };
+
+  if (!window._roomChatMessages) window._roomChatMessages = [];
+  window._roomChatMessages.push(msgObj);
+
+  sendMqtt({
+    type: 'room_chat',
+    ...msgObj
+  });
+
+  vibrate(20);
+  openRoomChatModal();
+}
+
+// Solicitud de historial de invitados por el Administrador
+function requestRemoteHistoryFromGuests() {
+  if (!isAdmin()) return;
+  sendGlobalMqtt({
+    type: 'admin_req_history',
+    from: 'Juan',
+    adminId: S.adminId
+  });
 }
 
 function directJoinRoom(code) {
@@ -1519,6 +1888,72 @@ function handleMqttMsg(d) {
       if (!S.game && (tab === 'play' || tab === 'groups')) {
         const sec = document.getElementById('live-tables-section') || document.getElementById('live-tables-section-groups');
         if (sec) sec.innerHTML = renderLiveTablesCard();
+      }
+    }
+  } else if (d.type === 'direct_chat') {
+    const myName = (myPlayerName || (isAdmin() ? 'Juan' : '')).trim().toLowerCase();
+    const canonMyName = getCanonicalPlayerName(myName).toLowerCase();
+    const isTarget = (d.target && (d.target.trim().toLowerCase() === myName || d.target.trim().toLowerCase() === canonMyName)) ||
+                     (Array.isArray(d.targets) && d.targets.some(t => t.trim().toLowerCase() === myName || t.trim().toLowerCase() === canonMyName));
+    if (isTarget) {
+      saveChatMessage(d.from, { ...d, me: false });
+      playChatSound();
+      vibrate([100, 40, 100]);
+      if (window._currentChatWith && getCanonicalPlayerName(window._currentChatWith).toLowerCase() === getCanonicalPlayerName(d.from).toLowerCase()) {
+        openFriendChatModal(window._currentChatWith);
+      } else {
+        showIncomingChatBanner(d.from, d.text, false);
+      }
+    }
+  } else if (d.type === 'room_chat') {
+    if (currentRoomCode && d.roomCode === currentRoomCode) {
+      if (!window._roomChatMessages) window._roomChatMessages = [];
+      window._roomChatMessages.push(d);
+      playChatSound();
+      vibrate([80, 40, 80]);
+      if (window._roomChatOpen) {
+        openRoomChatModal();
+      } else {
+        showIncomingChatBanner(d.from, d.text, true);
+      }
+    }
+  } else if (d.type === 'game_finished_report') {
+    if (d.game && d.game.id) {
+      if (!S.games) S.games = [];
+      if (!S.games.some(x => x.id === d.game.id)) {
+        d.game.isRemoteGuestGame = true;
+        S.games.unshift(d.game);
+        save();
+        if (tab === 'history') render();
+        if (isAdmin()) {
+          toast(`📜 Partida de ${d.game.players.map(p => p.name).join(' y ')} recibida en tu historial`);
+        }
+      }
+    }
+  } else if (d.type === 'admin_req_history') {
+    if (!isAdmin() && S.games && S.games.length) {
+      sendGlobalMqtt({
+        type: 'admin_report_history',
+        games: S.games,
+        deviceName: myPlayerName || 'Invitado'
+      });
+    }
+  } else if (d.type === 'admin_report_history') {
+    if (isAdmin() && Array.isArray(d.games)) {
+      let added = 0;
+      if (!S.games) S.games = [];
+      d.games.forEach(g => {
+        if (g && g.id && !S.games.some(x => x.id === g.id)) {
+          g.isRemoteGuestGame = true;
+          S.games.push(g);
+          added++;
+        }
+      });
+      if (added > 0) {
+        S.games.sort((a, b) => (b.date || 0) - (a.date || 0));
+        save();
+        if (tab === 'history') render();
+        toast(`📜 ${added} partida(s) de tus amigos sincronizadas`);
       }
     }
   }
@@ -2959,6 +3394,7 @@ function viewGroups() {
                 </div>
                 <div class="row" style="gap:4px">
                   <button class="btn ghost sm" style="padding:4px 8px;font-size:.78rem" onclick="showFriendStatsModal('${esc(f.name)}')">📊 Stats</button>
+                  ${!isMe ? `<button class="btn sm" style="padding:4px 9px;font-size:.78rem;background:var(--ok);border-color:var(--ok)" onclick="openFriendChatModal('${esc(f.name)}')">💬 Mensaje</button>` : ''}
                   ${!isMe ? `<button class="btn sm" style="padding:4px 9px;font-size:.78rem" onclick="challengeFriend('${esc(f.name)}')">⚔️ Retar</button>` : ''}
                 </div>
               </div>
@@ -3027,22 +3463,63 @@ function winsFor(gid) { const w = {}; S.games.filter(g => !gid || g.groupId === 
 
 // ---------- HISTORIAL ----------
 let histFilter = '';
+let histScope = 'all'; // 'all' | 'mine' | 'guests'
+
 function viewHistory() {
-  const games = S.games.filter(g => !histFilter || g.groupId === histFilter);
+  let filtered = S.games.filter(g => !histFilter || g.groupId === histFilter);
+
+  if (isAdmin()) {
+    if (histScope === 'guests') {
+      filtered = filtered.filter(g => g.isRemoteGuestGame || (g.adminId && g.adminId !== S.adminId) || (g.players && !g.players.some(p => p.name.toLowerCase() === 'juan')));
+    } else if (histScope === 'mine') {
+      filtered = filtered.filter(g => !g.isRemoteGuestGame && (g.adminId === S.adminId || (g.players && g.players.some(p => p.name.toLowerCase() === 'juan'))));
+    }
+  }
+
   const w = Object.entries(winsFor(histFilter)).sort((a, b) => b[1] - a[1]);
   const medals = ['1.', '2.', '3.'];
-  return `<select onchange="histFilter=this.value;render()"><option value="">Todos los grupos</option>
-    ${S.groups.map(g => `<option value="${g.id}" ${g.id === histFilter ? 'selected' : ''}>${esc(g.name)}</option>`).join('')}</select>
-  ${w.length ? `<h2>Ranking de victorias</h2><div class="card">${w.map(([n, c], i) => `<div class="rank"><span>${medals[i] || '·'} ${esc(n)}${games.length && games[0].winner === n ? ' 👑' : ''}</span><b>${c}</b></div>`).join('')}</div>` : ''}
-  ${playerStatsHtml(games)}
-  <div class="row between" style="margin-top:18px;margin-bottom:8px">
-    <h2 style="margin:0;border:0">Partidas (${games.length})</h2>
-    ${games.length ? `<button class="btn ghost sm" onclick="syncAllHistoryToMobiles()">⚡ Sincronizar con móviles</button>` : ''}
-  </div>
-  ${games.length ? games.map(g => `<div class="card" onclick="showGame('${g.id}')" style="cursor:pointer">
-    <div class="row between"><b>${esc(g.winner)}</b><span class="muted">${new Date(g.date).toLocaleDateString('es-ES', { day: 'numeric', month: 'short', year: 'numeric' })}</span></div>
-    <div class="muted">${esc(g.groupName)} · ${g.rounds.length} rondas · ${g.how}</div>
-    <div class="muted">${g.players.map(p => `${esc(p.name)} ${p.score}`).join(' · ')}</div></div>`).join('') : '<div class="empty">Todavía no habéis jugado ninguna partida</div>'}`;
+
+  const adminScopeHTML = isAdmin() ? `
+    <div class="seg" style="margin-bottom:12px">
+      <button class="${histScope === 'all' ? 'on' : ''}" onclick="histScope='all';render()">Todas (${S.games.length})</button>
+      <button class="${histScope === 'mine' ? 'on' : ''}" onclick="histScope='mine';render()">Mis partidas</button>
+      <button class="${histScope === 'guests' ? 'on' : ''}" onclick="histScope='guests';render()">Jugadas por amigos</button>
+    </div>
+  ` : '';
+
+  return `
+    ${adminScopeHTML}
+    <div class="row between" style="margin-bottom:10px">
+      <select style="margin:0;flex:1" onchange="histFilter=this.value;render()">
+        <option value="">Todos los grupos</option>
+        ${S.groups.map(g => `<option value="${g.id}" ${g.id === histFilter ? 'selected' : ''}>${esc(g.name)}</option>`).join('')}
+      </select>
+      ${isAdmin() ? `<button class="btn ghost sm" style="white-space:nowrap;padding:7px 10px;font-size:.8rem" onclick="requestRemoteHistoryFromGuests();toast('🔄 Solicitando partidas a los móviles...')">🔄 Sincronizar de amigos</button>` : ''}
+    </div>
+
+    ${w.length ? `<h2>Ranking de victorias</h2><div class="card">${w.map(([n, c], i) => `<div class="rank"><span>${medals[i] || '·'} ${esc(n)}${filtered.length && filtered[0].winner === n ? ' 👑' : ''}</span><b>${c}</b></div>`).join('')}</div>` : ''}
+    ${playerStatsHtml(filtered)}
+
+    <div class="row between" style="margin-top:18px;margin-bottom:8px">
+      <h2 style="margin:0;border:0">Partidas (${filtered.length})</h2>
+      ${filtered.length ? `<button class="btn ghost sm" onclick="syncAllHistoryToMobiles()">⚡ Enviar a móviles</button>` : ''}
+    </div>
+
+    ${filtered.length ? filtered.map(g => {
+      const isGuestGame = g.isRemoteGuestGame || (g.adminId && g.adminId !== S.adminId) || (g.players && !g.players.some(p => p.name.toLowerCase() === 'juan'));
+      return `
+        <div class="card" onclick="showGame('${g.id}')" style="cursor:pointer">
+          <div class="row between">
+            <b>${esc(g.winner)}</b>
+            <span class="muted">${new Date(g.date).toLocaleDateString('es-ES', { day: 'numeric', month: 'short', year: 'numeric' })}</span>
+          </div>
+          <div class="muted">${esc(g.groupName || 'Partida')} · ${g.rounds.length} rondas · ${g.how || 'Finalizada'}</div>
+          <div class="muted">${g.players.map(p => `${esc(p.name)} ${p.score}`).join(' · ')}</div>
+          ${isGuestGame ? `<div class="tag" style="background:#e0f2fe;color:#0369a1;border-color:#7dd3fc;display:inline-block;margin-top:4px;font-size:.74rem">📲 Partida de amigos (${g.players.map(p => esc(p.name)).join(' vs ')})</div>` : ''}
+        </div>
+      `;
+    }).join('') : '<div class="empty">Todavía no hay partidas registradas</div>'}
+  `;
 }
 function playerStatsHtml(games) {
   if (!games.length) return '';
@@ -3059,8 +3536,9 @@ function playerStatsHtml(games) {
 function showGame(id) {
   const g = S.games.find(x => x.id === id);
   if (!g) return;
-  modal(`<h2>${esc(g.groupName)} – ${new Date(g.date).toLocaleString('es-ES', { dateStyle: 'medium', timeStyle: 'short' })}</h2>
-    <p><b>${esc(g.winner)}</b> <span class="muted">(${g.how})</span></p>
+  modal(`<h2>${esc(g.groupName || 'Partida')} – ${new Date(g.date).toLocaleString('es-ES', { dateStyle: 'medium', timeStyle: 'short' })}</h2>
+    ${g.isRemoteGuestGame ? `<div class="tag" style="background:#e0f2fe;color:#0369a1;border-color:#7dd3fc;display:inline-block;margin-bottom:8px">📲 Partida jugada por amigos: ${g.players.map(p => esc(p.name)).join(' vs ')}</div>` : ''}
+    <p><b>${esc(g.winner)}</b> <span class="muted">(${g.how || 'Finalizada'})</span></p>
     <div style="max-height:45vh;overflow:auto"><table><tr><th>#</th>${g.players.map(p => `<th>${esc(p.name)}</th>`).join('')}</tr>
     ${g.rounds.map((r, n) => `<tr><td class="tag">${n + 1}</td>${r.totals.map((t, i) => {
       if (t === null) return `<td><span class="muted">–</span>${r.events[i] ? `<div class="tag">${esc(r.events[i])}</div>` : ''}</td>`;
@@ -3148,13 +3626,14 @@ checkAccessControl();
 requestWakeLock();
 applyTheme();
 setTimeout(broadcastPresence, 1200);
-setInterval(broadcastPresence, 45000);
+setInterval(broadcastPresence, 20000);
 setTimeout(broadcastTableAlive, 1500);
 setInterval(broadcastTableAlive, 20000);
 if (S && S.adminConfig && S.adminConfig.openMessageEnabled && S.adminConfig.openMessageText) {
   showOpenMessage(S.adminConfig.openMessageText);
 }
 $('#version').textContent = 'v' + APP_VERSION + ' ↻';
+updateConnectionIndicator();
 // Botón discreto: tocar la versión fuerza una recarga limpia (borra cachés, no borra datos)
 $('#version').onclick = () => modal(`<h2>Recargar la app</h2><p class="muted">Descarga de nuevo la última versión. Tus grupos, historial y normas no se borran.</p>
   <div class="row"><button class="btn ghost block" onclick="closeModal()">Cancelar</button><button id="btn-hard-reload" class="btn block" onclick="hardReload()">Recargar</button></div>`);
@@ -3166,7 +3645,7 @@ async function hardReload() {
   location.replace(location.pathname + '?r=' + Date.now());
 }
 
-// ---------- AUTO-ACTUALIZACIÓN ----------
+// ---------- AUTO-ACTUALIZACIÓN & RECONEXIÓN AUTOMÁTICA EN MÓVILES ----------
 // Al abrir la app, al volver a ella y cada minuto: si hay versión nueva publicada,
 // borra todas las cachés, actualiza el service worker y recarga a la fuerza.
 async function checkUpdate() {
@@ -3184,7 +3663,21 @@ async function checkUpdate() {
   } catch (e) { /* sin conexión: seguimos con la versión actual */ }
 }
 checkUpdate();
-document.addEventListener('visibilitychange', () => { if (!document.hidden) checkUpdate(); });
-window.addEventListener('focus', checkUpdate);
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) {
+    checkUpdate();
+    ensureMqttConnected();
+    broadcastPresence();
+  }
+});
+window.addEventListener('focus', () => {
+  checkUpdate();
+  ensureMqttConnected();
+  broadcastPresence();
+});
+window.addEventListener('online', () => {
+  toast('📶 Conexión restaurada');
+  ensureMqttConnected(true);
+});
 setInterval(checkUpdate, 60000);
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' });

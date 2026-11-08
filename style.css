@@ -408,3 +408,30 @@ body.dark .role-pill.admin {
 .mini-card { font-size: .75rem; font-weight: 700; padding: 1px 4px; border-radius: 3px; background: #fff; border: 1px solid #cbd5e1; color: #1d1b18; }
 .mini-card.loose { border-color: #fca5a5; background: #fef2f2; color: #b91c1c; }
 
+/* ========== CHAT Y MENSAJERÍA DIRECTA ========== */
+.conn-dot { font-size: .85rem; cursor: pointer; padding: 2px 4px; border-radius: 4px; display: inline-flex; align-items: center; }
+.chat-container { display: flex; flex-direction: column; max-height: 65vh; }
+.chat-messages { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding: 10px 4px; -webkit-overflow-scrolling: touch; max-height: 40vh; min-height: 120px; }
+.chat-bubble { max-width: 82%; padding: 8px 12px; border-radius: 12px; font-size: .88rem; line-height: 1.35; word-break: break-word; position: relative; }
+.chat-bubble.mine { align-self: flex-end; background: #22543d; color: #fff; border-bottom-right-radius: 2px; }
+.chat-bubble.theirs { align-self: flex-start; background: #fff; color: var(--ink); border: 1px solid var(--line); border-bottom-left-radius: 2px; }
+.chat-time { font-size: .68rem; opacity: .7; margin-top: 3px; text-align: right; }
+.chat-chips { display: flex; gap: 6px; overflow-x: auto; padding: 6px 2px; margin-top: 6px; -webkit-overflow-scrolling: touch; }
+.chat-chip { font-size: .75rem; font-weight: 500; padding: 4px 10px; background: var(--paper2); border-radius: 14px; border: 1px solid var(--line); cursor: pointer; white-space: nowrap; flex-shrink: 0; color: var(--ink); }
+.chat-chip:active { background: var(--line); }
+.chat-input-bar { display: flex; gap: 6px; margin-top: 8px; align-items: center; }
+.chat-input-bar input { margin: 0; padding: 9px 12px; font-size: .9rem; border-radius: 20px; }
+.chat-input-bar button { padding: 9px 14px; font-size: .85rem; border-radius: 20px; white-space: nowrap; }
+
+/* Banner flotante de mensaje entrante */
+.incoming-chat-banner {
+  position: fixed; top: calc(var(--safe-t) + 12px); left: 16px; right: 16px; z-index: 10000;
+  background: #1d1b18; color: #fff; border: 1.5px solid #22c55e; border-radius: 10px;
+  padding: 10px 14px; box-shadow: 0 8px 24px rgba(0,0,0,0.4); display: flex; justify-content: space-between; align-items: center;
+  animation: slideDown .25s ease;
+}
+@keyframes slideDown { from { transform: translateY(-50px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+.incoming-chat-banner .chat-text { font-size: .85rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 65%; }
+.incoming-chat-banner .chat-sender { font-weight: 700; color: #4ade80; }
+
+

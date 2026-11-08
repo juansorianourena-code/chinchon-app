@@ -635,6 +635,10 @@ function applyRoundToGame(entries) {
   if (alive.length === 1) {
     S.game.winner = alive[0].name;
     playCardAudio('win');
+    if (typeof finishGame === 'function') {
+      const winnerIdx = S.game.players.findIndex(p => p.name === alive[0].name);
+      setTimeout(() => finishGame(winnerIdx >= 0 ? winnerIdx : 0, 'eliminación'), 1200);
+    }
   }
 
   // Rotar el repartidor
@@ -961,8 +965,9 @@ function renderCardTableUI() {
           <button class="switcher-btn active" onclick="window._activeCardView='table';render()">🎴 Tapete</button>
           <button class="switcher-btn" onclick="window._activeCardView='scoreboard';render()">📊 Marcador</button>
         </div>
-        <div class="table-header-info">
+        <div class="table-header-info" style="display:flex;gap:4px;align-items:center">
           <span class="room-code-badge">${G.mode === 'online' ? 'Sala ' + G.roomCode : 'Mesa Virtual'}</span>
+          <button class="btn ghost sm" style="color:#f8fafc;border-color:#94a3b8;padding:4px 8px;font-size:.78rem" onclick="openRoomChatModal()">💬 Chat</button>
           <button class="btn ghost sm" style="color:#f8fafc;border-color:#94a3b8;padding:4px 8px;font-size:.78rem" onclick="toggleSoloPracticeMode()">${window._soloPracticeMode ? '🤖 Bots ON' : '👤 Bots OFF'}</button>
         </div>
       </div>
