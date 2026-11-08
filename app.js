@@ -1,5 +1,5 @@
 // ===== Chinchón – Marcador =====
-const APP_VERSION = '1.17.3';
+const APP_VERSION = '1.17.4';
 const KEY = 'chinchon-data-v1';
 const OFFICIAL_RULES = [
   ['La baraja', 'Se juega con baraja española de 40 cartas (sin ochos ni nueves). Pueden jugar de 2 a 6 jugadores.'],
@@ -1178,111 +1178,164 @@ function flushMqttOutbox() {
   });
 }
 
-function scheduleMqttReconnect() {
-  if (_reconnectTimer) clearTimeout(_reconnectTimer);
-  _reconnectAttempts++;
-  const delay = Math.min(1200 * Math.pow(1.3, Math.min(_reconnectAttempts, 5)) + Math.random() * 400, 7000);
-  _reconnectTimer = setTimeout(() => {
-    _reconnectTimer = null;
-    initMqtt(currentRoomCode || 'auth_global');
-  }, delay);
+// ===== RED REDUNDANTE: conexión simultánea a varios brokers + entrega fiable =====
+// Cada mensaje se publica por TODOS los brokers conectados y se deduplica al recibirlo (_mid),
+// así dos móviles se ven aunque cada uno tenga caído un broker distinto.
+const _links = MQTT_BROKERS.map(b => ({ broker: b, client: null, state: 'disconnected', attempts: 0, timer: null }));
+const _subTopics = new Set(['chinchon/v1/auth_global']);
+const _seenMids = new Map();
+let _connectCbs = [];
+let _lastHistReq = 0;
+
+function _linkConnected(l) {
+  try { return !!(l.client && l.state === 'connected' && l.client.isConnected()); } catch(e) { return false; }
 }
-
-function ensureMqttConnected(force = false) {
-  if (force) {
-    if (_reconnectTimer) clearTimeout(_reconnectTimer);
-    try { if (mqttClient) mqttClient.disconnect(); } catch(e) {}
-    mqttClient = null;
-    _mqttStatus = 'disconnected';
-    updateConnectionIndicator();
-    toast('🔄 Reconectando con la red...', 1800);
-    initMqtt(currentRoomCode || 'auth_global');
-    return;
-  }
-  if (!mqttClient || !mqttClient.isConnected || !mqttClient.isConnected()) {
-    initMqtt(currentRoomCode || 'auth_global');
-  }
-}
-
-function initMqtt(roomCode, onConnect) {
-  if (roomCode && roomCode !== 'auth_global') currentRoomCode = roomCode;
-  
-  // Si ya estamos conectados con el socket vivo
-  if (mqttClient && mqttClient.isConnected && mqttClient.isConnected()) {
-    _mqttStatus = 'connected';
-    updateConnectionIndicator();
-    if (roomCode && roomCode !== 'auth_global') {
-      try { mqttClient.subscribe(`chinchon/v1/${roomCode}`, { qos: 1 }); } catch(e) {}
-    }
-    flushMqttOutbox();
-    if (onConnect) onConnect();
-    return;
-  }
-
-  if (typeof Paho === 'undefined' || !Paho.MQTT) {
-    console.warn('Paho MQTT no disponible');
-    return;
-  }
-
-  _mqttStatus = 'connecting';
+function _anyConnected() { return _links.some(_linkConnected); }
+function _refreshStatus() {
+  _mqttStatus = _anyConnected() ? 'connected' : (_links.some(l => l.state === 'connecting') ? 'connecting' : 'disconnected');
   updateConnectionIndicator();
+}
 
-  const broker = MQTT_BROKERS[_currentBrokerIdx];
-  const clientId = 'ch_' + CLIENT_ID + '_' + Math.random().toString(36).substring(2, 6);
-
-  try {
-    mqttClient = new Paho.MQTT.Client(broker.host, broker.port, broker.path, clientId);
-
-    mqttClient.onConnectionLost = (responseObject) => {
-      _mqttStatus = 'disconnected';
-      updateConnectionIndicator();
-      if (_reconnectAttempts > 4 && _reconnectAttempts % 2 === 0) {
-        _currentBrokerIdx = (_currentBrokerIdx + 1) % MQTT_BROKERS.length;
-      }
-      scheduleMqttReconnect();
-    };
-
-    mqttClient.onMessageArrived = (msg) => {
+// Fachada con la misma API que un cliente Paho: el resto del código no cambia
+const _mqttFacade = {
+  isConnected: () => _anyConnected(),
+  subscribe: (topic) => {
+    _subTopics.add(topic);
+    _links.forEach(l => { if (_linkConnected(l)) { try { l.client.subscribe(topic, { qos: 1 }); } catch(e) {} } });
+  },
+  disconnect: () => {
+    _links.forEach(l => { try { if (l.client) l.client.disconnect(); } catch(e) {} l.client = null; l.state = 'disconnected'; });
+  },
+  send: (m) => {
+    let payload = m.payloadString;
+    const dest = m.destinationName;
+    try {
+      const o = JSON.parse(payload);
+      if (!o._mid) { o._mid = uid() + uid(); payload = JSON.stringify(o); }
+      _seenMids.set(o._mid, Date.now());
+    } catch(e) {}
+    let sent = 0;
+    _links.forEach(l => {
+      if (!_linkConnected(l)) return;
       try {
-        const payload = JSON.parse(msg.payloadString);
-        handleMqttMsg(payload);
+        const mm = new Paho.MQTT.Message(payload);
+        mm.destinationName = dest;
+        mm.qos = 1;
+        l.client.send(mm);
+        sent++;
       } catch(e) {}
-    };
+    });
+    if (!sent) throw new Error('sin conexion');
+  }
+};
+mqttClient = _mqttFacade;
 
-    mqttClient.connect({
+function _scheduleLink(l) {
+  if (l.timer) clearTimeout(l.timer);
+  l.attempts++;
+  const delay = Math.min(1500 * Math.pow(1.4, Math.min(l.attempts, 6)), 15000) + Math.random() * 500;
+  l.timer = setTimeout(() => { l.timer = null; _connectLink(l); }, delay);
+}
+
+function _connectLink(l) {
+  if (l.state === 'connecting' || _linkConnected(l)) return;
+  if (typeof Paho === 'undefined' || !Paho.MQTT) return;
+  l.state = 'connecting';
+  _refreshStatus();
+  const cid = 'ch_' + CLIENT_ID + '_' + Math.random().toString(36).slice(2, 6);
+  let c;
+  try { c = new Paho.MQTT.Client(l.broker.host, l.broker.port, l.broker.path, cid); }
+  catch(e) { l.state = 'disconnected'; _refreshStatus(); _scheduleLink(l); return; }
+  l.client = c;
+  c.onConnectionLost = () => {
+    if (l.client !== c) return;
+    l.state = 'disconnected'; _refreshStatus(); _scheduleLink(l);
+  };
+  c.onMessageArrived = (msg) => {
+    try {
+      const p = JSON.parse(msg.payloadString);
+      if (p._mid) {
+        if (_seenMids.has(p._mid)) return;
+        _seenMids.set(p._mid, Date.now());
+        if (_seenMids.size > 600) {
+          const cut = Date.now() - 120000;
+          for (const [k, v] of _seenMids) if (v < cut) _seenMids.delete(k);
+        }
+      }
+      handleMqttMsg(p);
+    } catch(e) {}
+  };
+  try {
+    c.connect({
       useSSL: true,
       timeout: 8,
       cleanSession: true,
-      keepAliveInterval: 15, // intervalo óptimo para conexiones móviles 4G/5G/Wi-Fi
+      keepAliveInterval: 20,
       onSuccess: () => {
-        _mqttStatus = 'connected';
-        _reconnectAttempts = 0;
-        updateConnectionIndicator();
-        try { mqttClient.subscribe('chinchon/v1/auth_global', { qos: 1 }); } catch(e) {}
-        if (currentRoomCode && currentRoomCode !== 'auth_global') {
-          try { mqttClient.subscribe(`chinchon/v1/${currentRoomCode}`, { qos: 1 }); } catch(e) {}
-        }
+        if (l.client !== c) return;
+        l.state = 'connected'; l.attempts = 0;
+        _subTopics.forEach(t => { try { c.subscribe(t, { qos: 1 }); } catch(e) {} });
+        _refreshStatus();
         flushMqttOutbox();
         broadcastPresence();
-        if (isAdmin()) {
+        if (isAdmin() && Date.now() - _lastHistReq > 15000) {
+          _lastHistReq = Date.now();
           setTimeout(requestRemoteHistoryFromGuests, 1200);
         }
-        if (onConnect) onConnect();
+        const cbs = _connectCbs; _connectCbs = [];
+        cbs.forEach(f => { try { f(); } catch(e) {} });
         if (!isHost || !S.game) sendMqtt({ type: 'reqSync' });
+        resendAllPending();
       },
-      onFailure: (err) => {
-        _mqttStatus = 'disconnected';
-        updateConnectionIndicator();
-        if (_reconnectAttempts > 4 && _reconnectAttempts % 2 === 0) {
-          _currentBrokerIdx = (_currentBrokerIdx + 1) % MQTT_BROKERS.length;
-        }
-        scheduleMqttReconnect();
+      onFailure: () => {
+        if (l.client !== c) return;
+        l.state = 'disconnected'; _refreshStatus(); _scheduleLink(l);
       }
     });
+  } catch(e) { l.state = 'disconnected'; _refreshStatus(); _scheduleLink(l); }
+}
+
+function scheduleMqttReconnect() { _links.forEach(l => { if (!_linkConnected(l) && l.state !== 'connecting' && !l.timer) _scheduleLink(l); }); }
+
+function ensureMqttConnected(force = false, quiet = false) {
+  if (force) {
+    _links.forEach(l => {
+      if (l.timer) { clearTimeout(l.timer); l.timer = null; }
+      try { if (l.client) l.client.disconnect(); } catch(e) {}
+      l.client = null; l.state = 'disconnected'; l.attempts = 0;
+    });
+    _refreshStatus();
+    if (!quiet) toast('🔄 Reconectando con la red...', 1800);
+  }
+  _links.forEach(_connectLink);
+}
+
+function initMqtt(roomCode, onConnect) {
+  if (roomCode && roomCode !== 'auth_global') {
+    currentRoomCode = roomCode;
+    _mqttFacade.subscribe(`chinchon/v1/${roomCode}`);
+  }
+  if (onConnect) {
+    if (_anyConnected()) onConnect(); else _connectCbs.push(onConnect);
+  }
+  if (_anyConnected()) flushMqttOutbox();
+  _links.forEach(_connectLink);
+}
+
+function _publish(dest, data) {
+  if (!_anyConnected()) {
+    _mqttOutbox.push({ dest, data });
+    ensureMqttConnected();
+    return;
+  }
+  try {
+    const m = new Paho.MQTT.Message(JSON.stringify(data));
+    m.destinationName = dest;
+    m.qos = 1;
+    mqttClient.send(m);
   } catch(e) {
-    _mqttStatus = 'disconnected';
-    updateConnectionIndicator();
-    scheduleMqttReconnect();
+    _mqttOutbox.push({ dest, data });
+    ensureMqttConnected();
   }
 }
 
@@ -1290,43 +1343,73 @@ function sendMqtt(data) {
   data.clientId = CLIENT_ID;
   if (!data.from) data.from = (isAdmin() ? 'Juan' : (myPlayerName || 'Invitado'));
   data.senderName = data.from;
-  const dest = `chinchon/v1/${currentRoomCode || 'auth_global'}`;
-  if (!mqttClient || !mqttClient.isConnected || !mqttClient.isConnected()) {
-    _mqttOutbox.push({ dest, data });
-    ensureMqttConnected();
-    return;
-  }
-  try {
-    const m = new Paho.MQTT.Message(JSON.stringify(data));
-    m.destinationName = dest;
-    m.qos = 1;
-    mqttClient.send(m);
-  } catch(e) {
-    _mqttOutbox.push({ dest, data });
-    ensureMqttConnected();
-  }
+  _publish(`chinchon/v1/${currentRoomCode || 'auth_global'}`, data);
 }
 
 function sendGlobalMqtt(data) {
   data.clientId = CLIENT_ID;
   if (!data.from) data.from = (isAdmin() ? 'Juan' : (myPlayerName || 'Invitado'));
   data.senderName = data.from;
-  const dest = 'chinchon/v1/auth_global';
-  if (!mqttClient || !mqttClient.isConnected || !mqttClient.isConnected()) {
-    _mqttOutbox.push({ dest, data });
-    ensureMqttConnected();
-    return;
-  }
-  try {
-    const m = new Paho.MQTT.Message(JSON.stringify(data));
-    m.destinationName = dest;
-    m.qos = 1;
-    mqttClient.send(m);
-  } catch(e) {
-    _mqttOutbox.push({ dest, data });
-    ensureMqttConnected();
-  }
+  _publish('chinchon/v1/auth_global', data);
 }
+
+// ----- Entrega fiable (mensajes y retos): se reintenta hasta recibir confirmación (ack) -----
+const _seenRids = new Set();
+const _lastResend = {};
+function getPending() { try { return JSON.parse(localStorage.getItem('chinchon_pending') || '[]'); } catch(e) { return []; } }
+function setPending(a) { try { localStorage.setItem('chinchon_pending', JSON.stringify(a.slice(-60))); } catch(e) {} }
+function pendingTtl(x) { return x.type === 'direct_chat' ? 7 * 24 * 3600 * 1000 : 10 * 60 * 1000; }
+function sendReliable(data) {
+  data.rid = data.rid || uid();
+  data.sentAt = Date.now();
+  const p = getPending(); p.push(data); setPending(p);
+  sendGlobalMqtt({ ...data });
+}
+function _pendingTargets(x) {
+  return [x.target, ...(Array.isArray(x.targets) ? x.targets : [])].filter(Boolean).map(t => t.trim().toLowerCase());
+}
+function resendPendingFor(name) {
+  if (!name) return;
+  const raw = name.trim().toLowerCase();
+  const canon = getCanonicalPlayerName(name).trim().toLowerCase();
+  const now = Date.now();
+  if (now - (_lastResend[canon] || 0) < 8000) return;
+  const alive = getPending().filter(x => now - x.sentAt < pendingTtl(x));
+  setPending(alive);
+  const mine = alive.filter(x => { const t = _pendingTargets(x); return t.includes(raw) || t.includes(canon); });
+  if (!mine.length) return;
+  _lastResend[canon] = now;
+  mine.forEach(x => sendGlobalMqtt({ ...x }));
+}
+function resendAllPending() {
+  const now = Date.now();
+  const alive = getPending().filter(x => now - x.sentAt < pendingTtl(x));
+  setPending(alive);
+  alive.forEach(x => sendGlobalMqtt({ ...x }));
+}
+function sendAck(d) {
+  if (!d.rid) return;
+  sendGlobalMqtt({ type: 'ack', rid: d.rid, by: (isAdmin() ? 'Juan' : (myPlayerName || 'Invitado')) });
+}
+function markDelivered(friendName, id) {
+  try {
+    const h = getChatHistory(friendName);
+    const it = h.find(m => m.id === id);
+    if (it) { it.delivered = true; localStorage.setItem(getChatStorageKey(friendName), JSON.stringify(h)); }
+    if (window._currentChatWith && getCanonicalPlayerName(window._currentChatWith).toLowerCase() === getCanonicalPlayerName(friendName).toLowerCase()) openFriendChatModal(window._currentChatWith);
+  } catch(e) {}
+}
+
+// Despertar del móvil / vuelta de la red: reconectar siempre (los sockets suelen quedar muertos en segundo plano)
+let _hiddenAt = 0;
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) { _hiddenAt = Date.now(); return; }
+  const away = Date.now() - _hiddenAt;
+  if (_hiddenAt && away > 8000) ensureMqttConnected(true, true); else ensureMqttConnected();
+  setTimeout(broadcastPresence, 800);
+});
+window.addEventListener('online', () => ensureMqttConnected(true, true));
+setInterval(() => { if (!_anyConnected()) ensureMqttConnected(); }, 8000);
 
 function notifyChatMessage(sender, text) {
   if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
@@ -1580,7 +1663,7 @@ function openFriendChatModal(friendName) {
         ${history.length ? history.map(m => `
           <div class="chat-bubble ${m.me ? 'mine' : 'theirs'}">
             <div>${esc(m.text)}</div>
-            <div class="chat-time">${new Date(m.time).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })}</div>
+            <div class="chat-time">${new Date(m.time).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })}${m.me ? (m.delivered ? ' ✓✓' : ' ✓') : ''}</div>
           </div>
         `).join('') : '<div class="muted" style="text-align:center;margin:auto">No hay mensajes todavía. ¡Dile algo!</div>'}
       </div>
@@ -1649,11 +1732,13 @@ function sendFriendChatMessage(friendName) {
   const targetAliases = friendObj && friendObj.aliases ? friendObj.aliases : [];
   const allTargets = [friendName, ...targetAliases];
 
-  sendGlobalMqtt({
+  sendReliable({
     type: 'direct_chat',
+    rid: msgObj.id,
     ...msgObj,
     targets: allTargets
   });
+  inp.value = '';
 
   vibrate(25);
   openFriendChatModal(friendName);
@@ -2127,7 +2212,10 @@ function handleMqttMsg(d) {
     const canonMyName = getCanonicalPlayerName(myName).toLowerCase();
     const isTarget = (d.target && (d.target.trim().toLowerCase() === myName || d.target.trim().toLowerCase() === canonMyName)) ||
                      (Array.isArray(d.targets) && d.targets.some(t => t.trim().toLowerCase() === myName || t.trim().toLowerCase() === canonMyName));
-    if (myName && isTarget && (!S.game || S.game.roomCode !== d.roomCode)) {
+    if (isTarget) sendAck(d);
+    if (myName && isTarget && (!S.game || S.game.roomCode !== d.roomCode) && !_seenRids.has(d.rid || d.roomCode)) {
+      _seenRids.add(d.rid || d.roomCode);
+      notifyChatMessage(d.from, '⚔️ te reta a una partida de Chinchón');
       ringBellSound();
       vibrate([100, 50, 100, 50, 200]);
       modal(`
@@ -2146,8 +2234,16 @@ function handleMqttMsg(d) {
         </div>
       `);
     }
+  } else if (d.type === 'ack') {
+    const p = getPending();
+    const it = p.find(x => x.rid === d.rid);
+    if (it) {
+      setPending(p.filter(x => x.rid !== d.rid));
+      if (it.type === 'direct_chat') markDelivered(it.target, it.id);
+    }
   } else if (d.type === 'presence_ping') {
     if (d.name) {
+      resendPendingFor(d.name);
       if (!window._onlineFriends) window._onlineFriends = {};
       const rawLower = d.name.trim().toLowerCase();
       const canonLower = getCanonicalPlayerName(d.name).trim().toLowerCase();
@@ -2201,6 +2297,9 @@ function handleMqttMsg(d) {
     const isTarget = (d.target && (d.target.trim().toLowerCase() === myName || d.target.trim().toLowerCase() === canonMyName)) ||
                      (Array.isArray(d.targets) && d.targets.some(t => t.trim().toLowerCase() === myName || t.trim().toLowerCase() === canonMyName));
     if (isTarget) {
+      sendAck(d);
+      const hist = getChatHistory(sender);
+      if (hist.some(m => m.id === d.id)) return;
       saveChatMessage(sender, { ...d, from: sender, me: false });
       playChatSound();
       vibrate([100, 40, 100]);
@@ -3628,7 +3727,7 @@ function startFriendDuel(targetName, duelType = 'cards') {
   const targetAliases = friendObj && friendObj.aliases ? friendObj.aliases : [];
   const allTargets = [targetName, ...targetAliases];
 
-  sendGlobalMqtt({
+  sendReliable({
     type: 'challenge',
     from: myName,
     target: targetName,
